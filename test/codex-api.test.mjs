@@ -135,6 +135,7 @@ tokenRequests.length = 0;
 images = await generateImages({ config, prompt: "x", n: 1 });
 assert.equal(images.length, 1);
 assert.equal(tokenRequests.length, 1);
+assert.deepEqual(Object.keys(tokenRequests[0]).sort(), ["client_id", "grant_type", "refresh_token"], "exactly the fields upstream sends, no scope");
 assert.equal(tokenRequests[0].grant_type, "refresh_token");
 assert.equal(tokenRequests[0].refresh_token, "rt.fake");
 assert.equal(tokenRequests[0].client_id, "app_from_id_token", "the client id comes from the id_token audience");
@@ -147,9 +148,24 @@ console.log("✓ 401 triggers a refresh and one retry");
   const { resolveClientId, readCodexTokens } = await loader.import("src/codex-api.ts");
   assert.equal(resolveClientId(config, readCodexTokens()), "app_from_id_token");
   assert.equal(resolveClientId({ ...config, codexClientId: "app_explicit" }, readCodexTokens()), "app_explicit");
+  // Codex's own override env var, honoured under its real name
+  process.env.CODEX_APP_SERVER_LOGIN_CLIENT_ID = "app_from_codex_env";
+  assert.equal(resolveClientId(config, readCodexTokens()), "app_from_codex_env");
+  assert.equal(resolveClientId({ ...config, codexClientId: "app_explicit" }, readCodexTokens()), "app_explicit", "our config still wins");
+  delete process.env.CODEX_APP_SERVER_LOGIN_CLIENT_ID;
   writeAuth({ auth_mode: "chatgpt", tokens: { access_token: fakeJwt(3600), account_id: "acct-42", refresh_token: "rt.fake" } });
   assert.equal(resolveClientId(config, readCodexTokens()), "app_EMoamEEZ73f0CkXaXp7hrann", "falls back only when there is no id_token");
-  console.log("✓ oauth client id: config → id_token aud → fallback");
+  console.log("✓ oauth client id: config → CODEX_APP_SERVER_LOGIN_CLIENT_ID → id_token aud → fallback");
+
+  // Codex's refresh-endpoint override is honoured too
+  const tokenUrl = process.env.PI_TEXT2IMAGE_CODEX_TOKEN_URL;
+  delete process.env.PI_TEXT2IMAGE_CODEX_TOKEN_URL;
+  process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE = "https://auth.example.test/oauth/token";
+  assert.equal(loadConfig(cwd).codexTokenUrl, "https://auth.example.test/oauth/token");
+  delete process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE;
+  assert.equal(loadConfig(cwd).codexTokenUrl, "https://auth.openai.com/oauth/token", "upstream default when nothing overrides it");
+  process.env.PI_TEXT2IMAGE_CODEX_TOKEN_URL = tokenUrl;
+  console.log("✓ CODEX_REFRESH_TOKEN_URL_OVERRIDE is honoured");
 }
 
 // An already-expired token refreshes before the first call

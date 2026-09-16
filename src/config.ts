@@ -206,7 +206,9 @@ export function loadConfig(cwd: string): Text2ImageConfig {
     codexApiModel: pick("codexApiModel", "PI_TEXT2IMAGE_CODEX_API_MODEL") ?? DEFAULTS.codexApiModel,
     codexOriginator: pick("codexOriginator", "PI_TEXT2IMAGE_CODEX_ORIGINATOR") ?? DEFAULTS.codexOriginator,
     codexClientId: pick("codexClientId", "PI_TEXT2IMAGE_CODEX_CLIENT_ID"),
-    codexTokenUrl: pick("codexTokenUrl", "PI_TEXT2IMAGE_CODEX_TOKEN_URL") ?? DEFAULTS.codexTokenUrl,
+    // CODEX_REFRESH_TOKEN_URL_OVERRIDE is codex's own knob; honouring it keeps
+    // both tools pointed at the same auth service.
+    codexTokenUrl: pick("codexTokenUrl", "PI_TEXT2IMAGE_CODEX_TOKEN_URL") ?? env.CODEX_REFRESH_TOKEN_URL_OVERRIDE?.trim() ?? DEFAULTS.codexTokenUrl,
     codexRefresh: !/^(0|false|no)$/i.test(pick("codexRefresh", "PI_TEXT2IMAGE_CODEX_REFRESH") ?? ""),
     extraBody: {
       ...(asRecord(user.extraBody) ?? {}),

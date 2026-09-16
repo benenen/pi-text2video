@@ -44,7 +44,7 @@ or per run: `PI_TEXT2IMAGE_PROVIDER=codex pi`.
 Reads the tokens `codex login` stored in `$CODEX_HOME/auth.json` and calls the Codex backend directly: one Responses request carrying an `image_generation` tool, and the PNG comes back as base64 in an `image_generation_call` item. About 40s per image.
 
 - Tokens are read at call time and sent to the Codex backend only. They are never written anywhere, never logged, and a refreshed access token stays in memory for the pi session instead of being written back to `auth.json`.
-- Expired access tokens refresh automatically (`codexRefresh: false` turns that off); a 401 triggers one refresh and one retry.
+- Expired access tokens refresh automatically (`codexRefresh: false` turns that off); a 401 triggers one refresh and one retry. The refresh request matches upstream's (`codex-rs/login/src/auth/manager.rs`) field for field, and codex's own `CODEX_APP_SERVER_LOGIN_CLIENT_ID` and `CODEX_REFRESH_TOKEN_URL_OVERRIDE` are honoured.
 - `codexApiModel` must be a model the account may use with Codex. On a ChatGPT plan `gpt-6-astra` works and the `gpt-5.x` names are rejected with *"model is not supported when using Codex with a ChatGPT account"* — the error says so and names the fix.
 - This is a private protocol with no compatibility promise, and the request identifies itself with the same `originator` the Codex CLI sends. If it ever breaks, switch to `"codexMode": "cli"`.
 
@@ -83,7 +83,7 @@ Merged highest first: environment variables → project config `./.pi/text2image
 | `codexBaseUrl` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_BASE_URL` | `https://chatgpt.com/backend-api/codex` | |
 | `codexRefresh` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_REFRESH` | `true` | refresh expired access tokens in memory |
 | `codexOriginator`, `codexTokenUrl` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_ORIGINATOR`, `…_TOKEN_URL` | Codex CLI values | escape hatches if the protocol moves |
-| `codexClientId` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_CLIENT_ID` | the `aud` of the stored `id_token` | OAuth client for token refresh; derived at runtime, override only if that fails |
+| `codexClientId` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_CLIENT_ID` | `CODEX_APP_SERVER_LOGIN_CLIENT_ID`, else the `aud` of the stored `id_token`, else the upstream constant | OAuth client used for token refresh |
 | `codexCommand` *(codex/cli)* | `PI_TEXT2IMAGE_CODEX_COMMAND` | `codex` | the Codex CLI to run |
 | `codexModel` *(codex/cli)* | `PI_TEXT2IMAGE_CODEX_MODEL` | Codex default | agent model for the turn, not the image model |
 | `httpProxy`, `httpsProxy`, `noProxy` | — | from `$CODEX_HOME/.env`, then the environment | see Proxy above |

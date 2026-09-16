@@ -45,11 +45,14 @@ export interface CodexTokens {
 }
 
 /**
- * Last resort only. The OAuth client id is public by design — it is a plain
- * identifier in the Codex binary — but hardcoding it means it rots silently, so
- * it is used only when the id_token carries no audience to read it from.
+ * The same constant upstream ships in the open: codex-rs/login/src/auth/manager.rs
+ * declares `pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann"`. Kept as
+ * the last resort only, because a copied constant rots silently.
  */
 const FALLBACK_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+/** Codex's own override, honoured so one env var steers both tools. */
+const CLIENT_ID_ENV_VAR = "CODEX_APP_SERVER_LOGIN_CLIENT_ID";
 
 /** Refreshed access tokens, kept for this process only. Keyed by refresh token. */
 const refreshedTokens = new Map<string, string>();
@@ -90,12 +93,14 @@ function jwtPayload(token: string): Record<string, unknown> | undefined {
 }
 
 /**
- * The OAuth client to refresh against: whatever the config says, else the
- * audience of the id_token codex stored (that is who the token was issued to),
- * else the known Codex CLI id.
+ * The OAuth client to refresh against: this extension's config, then codex's own
+ * override env var, then the audience of the id_token codex stored (that is who
+ * the token was issued to), and only then the upstream constant.
  */
 export function resolveClientId(config: Text2ImageConfig, tokens: CodexTokens): string {
   if (config.codexClientId) return config.codexClientId;
+  const fromEnv = process.env[CLIENT_ID_ENV_VAR]?.trim();
+  if (fromEnv) return fromEnv;
   const audience = tokens.idToken ? jwtPayload(tokens.idToken)?.aud : undefined;
   if (typeof audience === "string" && audience) return audience;
   if (Array.isArray(audience) && typeof audience[0] === "string" && audience[0]) return audience[0];
@@ -115,11 +120,11 @@ async function refreshAccessToken(config: Text2ImageConfig, tokens: CodexTokens,
   const response = await request(url, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
+    // Exactly the three fields upstream sends; no scope.
     body: JSON.stringify({
       client_id: resolveClientId(config, tokens),
       grant_type: "refresh_token",
       refresh_token: tokens.refreshToken,
-      scope: "openid profile email",
     }),
     signal,
     timeoutMs: 60_000,
