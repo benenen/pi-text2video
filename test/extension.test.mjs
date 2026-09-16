@@ -67,7 +67,14 @@ assert.equal(result.details.model, "b64");
 assert.match(result.details.endpoint, /^POST http:\/\/127\.0\.0\.1:\d+\/v1\/images\/generations$/);
 assert.match(result.content[0].text, /Provider: openai · model: b64/);
 assert.match(result.content[0].text, /Interface: POST http:\/\/127\.0\.0\.1:\d+\/v1\/images\/generations/);
-console.log("✓ tool result records provider, interface and model");
+
+// Reported size is what the file actually is; the requested size is labelled as such
+assert.equal(result.details.files[0].width, 1);
+assert.equal(result.details.files[0].height, 1);
+assert.equal(result.details.requestedSize, "1024x1024");
+assert.match(result.content[0].text, /requested size: 1024x1024/);
+assert.match(result.content[0].text, /\.png \(1×1, \d+ B\)/, "each file is reported with its real pixels");
+console.log("✓ tool result records provider, interface, model and real pixels");
 
 // Vision model: first two inlined, the rest still saved
 result = await tool.execute("call-2", { prompt: "a red panda", n: 3 }, undefined, undefined, makeCtx(["text", "image"]));
@@ -84,6 +91,7 @@ assert.match(tool.renderCall({ prompt: "a red panda", size: "1024x1024", n: 2 },
 const rendered = tool.renderResult(result, { expanded: false, isPartial: false }, theme, { showImages: true }).render(80).join("\n");
 assert.ok(rendered.includes("3 image(s)") && rendered.includes(result.details.files[0].path));
 assert.ok(rendered.includes("openai") && rendered.includes("/v1/images/generations"), "the rendered result names the backend");
+assert.ok(rendered.includes("1×1"), "the rendered result shows real pixels");
 assert.match(tool.renderResult({ content: [], details: undefined }, { expanded: false, isPartial: true }, theme, { showImages: true }).render(80).join(""), /generating/);
 console.log("✓ renderCall / renderResult");
 
@@ -105,6 +113,7 @@ assert.deepEqual(statuses.at(-1), { key: "text2image", text: undefined }, "statu
 const card = renderers.get("text2image")(entries.at(-1), { expanded: false }, theme).render(80).join("\n");
 assert.match(card, /a cat in a hat/);
 assert.ok(card.includes("openai") && card.includes("/v1/images/generations"), "the /image card names the backend too");
+assert.ok(card.includes("1×1"), "and the real pixels");
 console.log("✓ /image generates and appends a TUI entry");
 
 await command.handler("", makeCtx(["text"]));

@@ -82,7 +82,8 @@ Merged highest first: environment variables → project config `./.pi/text2image
 | `codexApiModel` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_API_MODEL` | `gpt-6-astra` | must be a model the account may use with Codex |
 | `codexBaseUrl` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_BASE_URL` | `https://chatgpt.com/backend-api/codex` | |
 | `codexRefresh` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_REFRESH` | `true` | refresh expired access tokens in memory |
-| `codexOriginator`, `codexClientId`, `codexTokenUrl` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_ORIGINATOR`, `…_CLIENT_ID`, `…_TOKEN_URL` | Codex CLI values | escape hatches if the protocol moves |
+| `codexOriginator`, `codexTokenUrl` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_ORIGINATOR`, `…_TOKEN_URL` | Codex CLI values | escape hatches if the protocol moves |
+| `codexClientId` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_CLIENT_ID` | the `aud` of the stored `id_token` | OAuth client for token refresh; derived at runtime, override only if that fails |
 | `codexCommand` *(codex/cli)* | `PI_TEXT2IMAGE_CODEX_COMMAND` | `codex` | the Codex CLI to run |
 | `codexModel` *(codex/cli)* | `PI_TEXT2IMAGE_CODEX_MODEL` | Codex default | agent model for the turn, not the image model |
 | `httpProxy`, `httpsProxy`, `noProxy` | — | from `$CODEX_HOME/.env`, then the environment | see Proxy above |
@@ -138,8 +139,9 @@ The two paths differ in exactly one way: `/image` results stay in the TUI and ne
   ```
   ✓ 1 image(s) · codex/api · gpt-6-astra · 56.1s
     POST https://chatgpt.com/backend-api/codex/responses (tool: image_generation)
-    /path/to/.pi/images/20260916-173420-a-brass-compass….png (2.3 MB)
+    /path/to/.pi/images/20260916-173420-a-brass-compass….png (1370×1148, 2.3 MB)
   ```
+- **Reported dimensions are the file's own**, read from its header. The configured `size` is a request: the codex backend picks its own resolution and OpenAI-compatible services round or ignore it, so results are labelled `requested size` and each file reports what it actually is.
 - Images are **always written to disk** first, by default under `.pi/images/`, named `timestamp-prompt-slug.png`; collisions get a numeric suffix.
 - Inline previews need a terminal that speaks an image protocol (kitty, iTerm2, Ghostty, WezTerm, Warp); the kitty protocol only accepts PNG. Elsewhere you get the paths, and nothing else is lost.
 - Only models with image input get images inlined into the context, at most 2 images and 4MB each; otherwise the model just gets the paths, so no tokens are wasted.

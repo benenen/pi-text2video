@@ -31,6 +31,9 @@ interface ImageFile {
   path: string;
   mimeType: string;
   bytes: number;
+  /** Actual pixels of the file on disk, not the size that was asked for. */
+  width?: number;
+  height?: number;
 }
 
 interface GenerateDetails {
@@ -39,7 +42,8 @@ interface GenerateDetails {
   provider: string;
   endpoint: string;
   model: string;
-  size?: string;
+  /** What was asked for. The files record what actually came back. */
+  requestedSize?: string;
   files: ImageFile[];
   /** Whether the images went into the tool result as image blocks — if they did, pi draws them and renderResult must not draw them again. */
   inlined: boolean;
@@ -61,7 +65,13 @@ interface InfoEntryData {
 }
 
 function toImageFile(saved: SavedImage): ImageFile {
-  return { path: saved.path, mimeType: saved.mimeType, bytes: saved.bytes };
+  return { path: saved.path, mimeType: saved.mimeType, bytes: saved.bytes, width: saved.width, height: saved.height };
+}
+
+/** Path plus what the file actually is — real pixels first, since the requested size is only a request. */
+function fileSummary(file: ImageFile): string {
+  const dimensions = file.width && file.height ? `${file.width}×${file.height}, ` : "";
+  return `${file.path} (${dimensions}${formatBytes(file.bytes)})`;
 }
 
 function errorMessage(err: unknown): string {
@@ -170,9 +180,9 @@ export default function (pi: ExtensionAPI) {
 
       const lines = [
         `Generated ${files.length} image(s) in ${(elapsedMs / 1000).toFixed(1)}s.`,
-        `Provider: ${backend.label} · model: ${backend.model}${size ? ` · size: ${size}` : ""}`,
+        `Provider: ${backend.label} · model: ${backend.model}${size ? ` · requested size: ${size}` : ""}`,
         `Interface: ${backend.endpoint}`,
-        ...files.map((file) => `- ${file.path} (${formatBytes(file.bytes)})`),
+        ...files.map((file) => `- ${fileSummary(toImageFile(file))}`),
       ];
       const revised = files.find((file) => file.revisedPrompt)?.revisedPrompt;
       if (revised) lines.push(`Provider rewrote the prompt as: ${revised}`);
@@ -195,7 +205,7 @@ export default function (pi: ExtensionAPI) {
           provider: backend.label,
           endpoint: backend.endpoint,
           model: backend.model,
-          size,
+          requestedSize: size,
           files: files.map(toImageFile),
           inlined,
           elapsedMs,
@@ -220,7 +230,7 @@ export default function (pi: ExtensionAPI) {
       const container = new Container();
       const summary = `✓ ${details.files.length} image(s) · ${details.provider ?? "?"} · ${details.model} · ${(details.elapsedMs / 1000).toFixed(1)}s`;
       const provenance = details.endpoint ? `  ${details.endpoint}` : "";
-      const paths = details.files.map((file) => `  ${file.path} (${formatBytes(file.bytes)})`).join("\n");
+      const paths = details.files.map((file) => `  ${fileSummary(file)}`).join("\n");
       container.addChild(new Text(`${theme.fg("success", summary)}\n${theme.fg("dim", [provenance, paths].filter(Boolean).join("\n"))}`, 0, 0));
 
       // Inlined images are drawn by pi itself; this only covers the case where
@@ -244,7 +254,7 @@ export default function (pi: ExtensionAPI) {
     const header = `${theme.fg("customMessageLabel", "🎨 image")} ${theme.fg("customMessageText", data.prompt)}`;
     const meta = `${data.provider ?? "?"} · ${data.model} · ${data.files.length} image(s) · ${(data.elapsedMs / 1000).toFixed(1)}s`;
     const provenance = data.endpoint ? `  ${data.endpoint}` : "";
-    const paths = data.files.map((file) => `  ${file.path} (${formatBytes(file.bytes)})`).join("\n");
+    const paths = data.files.map((file) => `  ${fileSummary(file)}`).join("\n");
     box.addChild(new Text(`${header}\n${theme.fg("dim", meta)}\n${theme.fg("dim", [provenance, paths].filter(Boolean).join("\n"))}`, 0, 0));
 
     for (const file of data.files) {

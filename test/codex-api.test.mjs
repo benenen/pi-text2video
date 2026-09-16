@@ -12,9 +12,9 @@ import { createLoader } from "./pi-runtime.mjs";
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 /** A JWT with only what the expiry check reads. */
-function fakeJwt(expSecondsFromNow) {
+function fakeJwt(expSecondsFromNow, claims = {}) {
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  return `${encode({ alg: "none" })}.${encode({ exp: Math.floor(Date.now() / 1000) + expSecondsFromNow })}.sig`;
+  return `${encode({ alg: "none" })}.${encode({ exp: Math.floor(Date.now() / 1000) + expSecondsFromNow, ...claims })}.sig`;
 }
 
 const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
@@ -79,8 +79,13 @@ const loader = await createLoader();
 const { loadConfig, describeConfig, describeBackend } = await loader.import("src/config.ts");
 const { generateImages } = await loader.import("src/images.ts");
 
-writeAuth({ auth_mode: "chatgpt", OPENAI_API_KEY: null, tokens: { access_token: fakeJwt(3600), account_id: "acct-42", refresh_token: "rt.fake" } });
+writeAuth({
+  auth_mode: "chatgpt",
+  OPENAI_API_KEY: null,
+  tokens: { access_token: fakeJwt(3600), id_token: fakeJwt(3600, { aud: "app_from_id_token" }), account_id: "acct-42", refresh_token: "rt.fake" },
+});
 const config = loadConfig(cwd);
+assert.equal(config.codexClientId, undefined, "the client id is not hardcoded in the config");
 assert.equal(config.codexMode, "api");
 assert.equal(config.timeoutMs, 300_000);
 assert.match(describeConfig(config, cwd).join("\n"), /provider {3}codex\/api/);
@@ -132,13 +137,23 @@ assert.equal(images.length, 1);
 assert.equal(tokenRequests.length, 1);
 assert.equal(tokenRequests[0].grant_type, "refresh_token");
 assert.equal(tokenRequests[0].refresh_token, "rt.fake");
-assert.equal(tokenRequests[0].client_id, config.codexClientId);
+assert.equal(tokenRequests[0].client_id, "app_from_id_token", "the client id comes from the id_token audience");
 assert.equal(backendRequests.length, 2, "one rejected call, one retry");
 assert.notEqual(backendRequests[1].headers.authorization, backendRequests[0].headers.authorization, "the retry must use the refreshed token");
 console.log("✓ 401 triggers a refresh and one retry");
 
+// Where the client id comes from: config → id_token audience → the known Codex id
+{
+  const { resolveClientId, readCodexTokens } = await loader.import("src/codex-api.ts");
+  assert.equal(resolveClientId(config, readCodexTokens()), "app_from_id_token");
+  assert.equal(resolveClientId({ ...config, codexClientId: "app_explicit" }, readCodexTokens()), "app_explicit");
+  writeAuth({ auth_mode: "chatgpt", tokens: { access_token: fakeJwt(3600), account_id: "acct-42", refresh_token: "rt.fake" } });
+  assert.equal(resolveClientId(config, readCodexTokens()), "app_EMoamEEZ73f0CkXaXp7hrann", "falls back only when there is no id_token");
+  console.log("✓ oauth client id: config → id_token aud → fallback");
+}
+
 // An already-expired token refreshes before the first call
-writeAuth({ auth_mode: "chatgpt", tokens: { access_token: fakeJwt(-10), account_id: "acct-42", refresh_token: "rt.expired" } });
+writeAuth({ auth_mode: "chatgpt", tokens: { access_token: fakeJwt(-10), id_token: fakeJwt(3600, { aud: "app_from_id_token" }), account_id: "acct-42", refresh_token: "rt.expired" } });
 backendMode = "item";
 tokenRequests.length = 0;
 await generateImages({ config: loadConfig(cwd), prompt: "x", n: 1 });

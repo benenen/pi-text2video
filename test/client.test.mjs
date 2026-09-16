@@ -16,7 +16,25 @@ delete process.env.PI_TEXT2IMAGE_SIZE;
 
 const loader = await createLoader();
 const { loadConfig, imagesEndpoint, resolveOutputDir, describeConfig, redactKey } = await loader.import("src/config.ts");
-const { generateImages, saveImages, formatBytes } = await loader.import("src/images.ts");
+const { generateImages, saveImages, formatBytes, imageDimensions } = await loader.import("src/images.ts");
+
+// Dimensions come from the file header, never from the requested size
+{
+  const gif = Buffer.concat([Buffer.from("GIF89a"), Buffer.from([3, 0, 5, 0])]);
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x07, 0x00, 0x09]), Buffer.alloc(9)]);
+  const webp = Buffer.concat([
+    Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP"), Buffer.from("VP8X"), Buffer.alloc(4),
+    Buffer.from([0]), Buffer.alloc(3),
+    Buffer.from([639 & 0xff, (639 >> 8) & 0xff, 0]), Buffer.from([479 & 0xff, (479 >> 8) & 0xff, 0]),
+  ]);
+  assert.deepEqual(imageDimensions(api.pngBuffer), { width: 1, height: 1 });
+  assert.deepEqual(imageDimensions(gif), { width: 3, height: 5 });
+  assert.deepEqual(imageDimensions(jpeg), { width: 9, height: 7 });
+  assert.deepEqual(imageDimensions(webp), { width: 640, height: 480 });
+  assert.equal(imageDimensions(Buffer.from("not an image")), undefined);
+  assert.equal(imageDimensions(api.pngBuffer.subarray(0, 8)), undefined, "a truncated header reports nothing rather than guessing");
+  console.log("✓ pixel dimensions parsed from png, gif, jpeg and webp headers");
+}
 
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "t2i-client-"));
 const config = loadConfig(cwd);
@@ -38,6 +56,8 @@ let saved = saveImages(images, { outputDir, prompt: "a red panda drinking tea" }
 assert.ok(fs.existsSync(saved[0].path));
 assert.ok(saved[0].path.endsWith(".png"));
 assert.equal(saved[0].bytes, api.pngBuffer.byteLength);
+assert.equal(saved[0].width, 1);
+assert.equal(saved[0].height, 1);
 console.log("✓ data[].b64_json →", path.basename(saved[0].path), formatBytes(saved[0].bytes));
 
 const last = api.requests.at(-1);

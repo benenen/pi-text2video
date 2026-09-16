@@ -40,7 +40,8 @@ export interface Text2ImageConfig {
   codexBaseUrl: string;
   codexApiModel: string;
   codexOriginator: string;
-  codexClientId: string;
+  /** Unset means "derive it from the id_token in auth.json", see codex-api.ts. */
+  codexClientId?: string;
   codexTokenUrl: string;
   codexRefresh: boolean;
   /** Merged into the request body verbatim — negative_prompt, guidance_scale and friends. */
@@ -122,7 +123,6 @@ const DEFAULTS = {
   codexBaseUrl: "https://chatgpt.com/backend-api/codex",
   codexApiModel: "gpt-6-astra",
   codexOriginator: "codex_cli_rs",
-  codexClientId: "app_EMoamEEZ73f0CkXaXp7hrann",
   codexTokenUrl: "https://auth.openai.com/oauth/token",
 } as const;
 
@@ -205,7 +205,7 @@ export function loadConfig(cwd: string): Text2ImageConfig {
     codexBaseUrl: (pick("codexBaseUrl", "PI_TEXT2IMAGE_CODEX_BASE_URL") ?? DEFAULTS.codexBaseUrl).replace(/\/+$/, ""),
     codexApiModel: pick("codexApiModel", "PI_TEXT2IMAGE_CODEX_API_MODEL") ?? DEFAULTS.codexApiModel,
     codexOriginator: pick("codexOriginator", "PI_TEXT2IMAGE_CODEX_ORIGINATOR") ?? DEFAULTS.codexOriginator,
-    codexClientId: pick("codexClientId", "PI_TEXT2IMAGE_CODEX_CLIENT_ID") ?? DEFAULTS.codexClientId,
+    codexClientId: pick("codexClientId", "PI_TEXT2IMAGE_CODEX_CLIENT_ID"),
     codexTokenUrl: pick("codexTokenUrl", "PI_TEXT2IMAGE_CODEX_TOKEN_URL") ?? DEFAULTS.codexTokenUrl,
     codexRefresh: !/^(0|false|no)$/i.test(pick("codexRefresh", "PI_TEXT2IMAGE_CODEX_REFRESH") ?? ""),
     extraBody: {

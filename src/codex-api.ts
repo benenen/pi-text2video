@@ -8,8 +8,9 @@
 //
 // Two things to know before touching this file:
 //   - It is a private protocol. There is no compatibility promise, and it
-//     identifies itself with the same `originator` the Codex CLI sends; that is
-//     the reason codexMode defaults to "cli".
+//     identifies itself with the same `originator` and user-agent the Codex CLI
+//     sends. It is the default because it works and is twice as fast, but when
+//     OpenAI changes the protocol the fix is codexMode "cli", not this file.
 //   - Tokens are read from auth.json and sent to the Codex backend only. They
 //     are never written anywhere, never logged, and a refreshed token stays in
 //     memory for this pi session instead of being written back to auth.json.
@@ -40,7 +41,15 @@ export interface CodexTokens {
   accessToken: string;
   accountId?: string;
   refreshToken?: string;
+  idToken?: string;
 }
+
+/**
+ * Last resort only. The OAuth client id is public by design — it is a plain
+ * identifier in the Codex binary — but hardcoding it means it rots silently, so
+ * it is used only when the id_token carries no audience to read it from.
+ */
+const FALLBACK_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 /** Refreshed access tokens, kept for this process only. Keyed by refresh token. */
 const refreshedTokens = new Map<string, string>();
@@ -65,19 +74,38 @@ export function readCodexTokens(): CodexTokens {
     accessToken,
     accountId: typeof raw?.tokens?.account_id === "string" ? raw.tokens.account_id : undefined,
     refreshToken: typeof raw?.tokens?.refresh_token === "string" ? raw.tokens.refresh_token : undefined,
+    idToken: typeof raw?.tokens?.id_token === "string" ? raw.tokens.id_token : undefined,
   };
+}
+
+/** JWT payload, unverified — used only to read public claims such as exp and aud. */
+function jwtPayload(token: string): Record<string, unknown> | undefined {
+  const payload = token.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    return JSON.parse(Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The OAuth client to refresh against: whatever the config says, else the
+ * audience of the id_token codex stored (that is who the token was issued to),
+ * else the known Codex CLI id.
+ */
+export function resolveClientId(config: Text2ImageConfig, tokens: CodexTokens): string {
+  if (config.codexClientId) return config.codexClientId;
+  const audience = tokens.idToken ? jwtPayload(tokens.idToken)?.aud : undefined;
+  if (typeof audience === "string" && audience) return audience;
+  if (Array.isArray(audience) && typeof audience[0] === "string" && audience[0]) return audience[0];
+  return FALLBACK_CLIENT_ID;
 }
 
 /** Reads `exp` out of the JWT payload. No signature check: this only decides when to refresh. */
 function expiresWithin(accessToken: string, seconds: number): boolean {
-  const payload = accessToken.split(".")[1];
-  if (!payload) return false;
-  try {
-    const decoded = JSON.parse(Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8"));
-    return typeof decoded?.exp === "number" && decoded.exp * 1000 - Date.now() < seconds * 1000;
-  } catch {
-    return false;
-  }
+  const exp = jwtPayload(accessToken)?.exp;
+  return typeof exp === "number" && exp * 1000 - Date.now() < seconds * 1000;
 }
 
 async function refreshAccessToken(config: Text2ImageConfig, tokens: CodexTokens, signal?: AbortSignal): Promise<string> {
@@ -88,7 +116,7 @@ async function refreshAccessToken(config: Text2ImageConfig, tokens: CodexTokens,
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
-      client_id: config.codexClientId,
+      client_id: resolveClientId(config, tokens),
       grant_type: "refresh_token",
       refresh_token: tokens.refreshToken,
       scope: "openid profile email",
