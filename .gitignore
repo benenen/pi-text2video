@@ -141,3 +141,9 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Default image output directory for this extension
+.pi/images/
+
+# Symlink to pi's own node_modules, used by the tests and editors (not installed deps)
+node_modules
