@@ -16,11 +16,13 @@
 //     memory for this pi session instead of being written back to auth.json.
 
 import * as fs from "node:fs";
+import { fromBase64 } from "../media.ts";
+import type { GenerateOptions, GeneratedImage } from "../types.ts";
 import { randomUUID } from "node:crypto";
 
-import { codexAuthPath, type Text2ImageConfig } from "./config.ts";
-import { request, sseEvents } from "./http.ts";
-import { describeProxy, proxyForUrl, resolveProxySettings } from "./proxy-env.ts";
+import { codexAuthPath, type Text2ImageConfig } from "../../config.ts";
+import { request, sseEvents } from "../../http.ts";
+import { describeProxy, proxyForUrl, resolveProxySettings } from "../../proxy-env.ts";
 
 export interface CodexImage {
   base64: string;
@@ -318,4 +320,13 @@ export async function generateImagesViaCodexApi(options: CodexApiOptions): Promi
     if (collected.length >= options.n) break;
   }
   return collected.slice(0, options.n);
+}
+
+/** Adapt this provider to the common in-memory image result. */
+export async function generateWithCodexApi(options: GenerateOptions): Promise<GeneratedImage[]> {
+  const { config } = options;
+  const n = Math.min(Math.max(options.n ?? 1, 1), 10);
+  const size = options.size?.trim() || config.size;
+  const results = await generateImagesViaCodexApi({ config, prompt: options.prompt, n, size, signal: options.signal });
+  return results.map((result) => fromBase64(result.base64, result.revisedPrompt));
 }

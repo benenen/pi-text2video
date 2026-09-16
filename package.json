@@ -1,12 +1,14 @@
 {
   "name": "pi-text2video",
   "version": "0.1.0",
-  "description": "Text-to-image tools for the pi coding agent, backed by any OpenAI-compatible images API",
+  "description": "Text-to-image and text-to-video tools for the pi coding agent, backed by OpenAI-compatible APIs",
   "keywords": [
     "pi-package",
     "pi-extension",
     "text-to-image",
-    "text2image"
+    "text2image",
+    "text-to-video",
+    "text2video"
   ],
   "license": "Apache-2.0",
   "repository": {
@@ -15,7 +17,7 @@
   },
   "type": "module",
   "scripts": {
-    "test": "node test/client.test.mjs && node test/proxy.test.mjs && node test/codex-auth.test.mjs && node test/codex-api.test.mjs && node test/codex-import.test.mjs && node test/codex-backend.test.mjs && node test/extension.test.mjs"
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
   },
   "pi": {
     "extensions": [

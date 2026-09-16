@@ -59,7 +59,42 @@ export type Provider = "openai" | "codex";
  */
 export type CodexMode = "cli" | "api";
 
-export type ApiKeySource = "config" | "openai-env" | "codex" | "none";
+export type ApiKeySource = "config" | "openai-env" | "minimax-env" | "codex" | "none";
+
+/**
+ * Video generation is a second, independent backend. It gets its own config file
+ * (`text2video.json`) and its own env prefix (`PI_TEXT2VIDEO_*`), because a video
+ * service is usually a different endpoint with different credentials from the
+ * images API — and its jobs are asynchronous, which images are not.
+ */
+export type VideoProvider = "openai" | "minimax";
+
+export interface Text2VideoConfig {
+  provider: VideoProvider;
+  baseUrl: string;
+  /** May be empty: gateways that need no key get no Authorization header. */
+  apiKey: string;
+  apiKeySource: ApiKeySource;
+  /** Why an existing codex login could not supply a key. Attached to 401/403 errors. */
+  codexHint?: string;
+  model: string;
+  /** undefined means "do not send a size field". */
+  size?: string;
+  /** Clip length; MiniMax maps this to its required integer `duration`. */
+  seconds?: string;
+  /** Relative paths resolve against cwd, see resolveOutputDir(). */
+  outputDir: string;
+  /** Timeout of a single HTTP request — submit, status poll or download. */
+  timeoutMs: number;
+  /** How long to wait for one asynchronous job; video takes minutes, not seconds. */
+  pollTimeoutMs: number;
+  pollIntervalMs: number;
+  /** Not sent by default: an unknown response_format is rejected by most services. */
+  responseFormat?: string;
+  headers: Record<string, string>;
+  /** Merged into the submit body verbatim — aspect_ratio, negative_prompt and friends. */
+  extraBody: Record<string, unknown>;
+}
 
 export interface CodexCredential {
   path: string;
@@ -77,6 +112,14 @@ export function userConfigPath(): string {
 
 export function projectConfigPath(cwd: string): string {
   return path.join(cwd, ".pi", "text2image.json");
+}
+
+export function userVideoConfigPath(): string {
+  return path.join(os.homedir(), ".pi", "agent", "text2video.json");
+}
+
+export function projectVideoConfigPath(cwd: string): string {
+  return path.join(cwd, ".pi", "text2video.json");
 }
 
 /** Honours CODEX_HOME the same way the codex CLI does. */
@@ -148,29 +191,37 @@ function parseJsonEnv(raw: string | undefined): Record<string, unknown> | undefi
   }
 }
 
-export function loadConfig(cwd: string): Text2ImageConfig {
-  const user = readJson(userConfigPath());
-  const project = readJson(projectConfigPath(cwd));
-  const env = process.env;
-
-  // An explicit empty string is meaningful input ("do not send this field"), so
-  // it stays distinguishable from "not configured".
+/**
+ * Env beats every config file, and files are consulted in the order given
+ * (project before user). An explicit empty string is meaningful input ("do not
+ * send this field"), so it stays distinguishable from "not configured".
+ */
+function createPickers(env: NodeJS.ProcessEnv, files: Record<string, unknown>[]) {
   const pickRaw = (key: string, envKey: string): string | undefined => {
     const fromEnv = env[envKey];
     if (typeof fromEnv === "string") return fromEnv.trim();
-    for (const source of [project, user]) {
+    for (const source of files) {
       const value = source[key];
       if (typeof value === "string") return value.trim();
     }
     return undefined;
   };
-  const pick = (key: string, envKey: string): string | undefined => pickRaw(key, envKey) || undefined;
-
-  const pickNumber = (key: string, envKey: string): number | undefined => {
-    const raw = pick(key, envKey) ?? (typeof project[key] === "number" ? String(project[key]) : undefined) ?? (typeof user[key] === "number" ? String(user[key]) : undefined);
-    const value = Number(raw);
-    return Number.isFinite(value) && value > 0 ? value : undefined;
+  return {
+    pickRaw,
+    pick: (key: string, envKey: string): string | undefined => pickRaw(key, envKey) || undefined,
+    pickNumber: (key: string, envKey: string): number | undefined => {
+      const fromFiles = files.map((source) => (typeof source[key] === "number" ? String(source[key]) : undefined)).find((value) => value !== undefined);
+      const value = Number(pickRaw(key, envKey) || fromFiles);
+      return Number.isFinite(value) && value > 0 ? value : undefined;
+    },
   };
+}
+
+export function loadConfig(cwd: string): Text2ImageConfig {
+  const user = readJson(userConfigPath());
+  const project = readJson(projectConfigPath(cwd));
+  const env = process.env;
+  const { pickRaw, pick, pickNumber } = createPickers(env, [project, user]);
 
   const provider: Provider = (pick("provider", "PI_TEXT2IMAGE_PROVIDER") ?? "openai").toLowerCase() === "codex" ? "codex" : "openai";
   const codexMode: CodexMode = (pick("codexMode", "PI_TEXT2IMAGE_CODEX_MODE") ?? "api").toLowerCase() === "cli" ? "cli" : "api";
@@ -227,14 +278,18 @@ function resolveApiKey(
   configured: string | undefined,
   env: NodeJS.ProcessEnv,
   files: Record<string, unknown>[],
+  context: { useCodexAuthEnvKey?: string; apiName?: string; configName?: string } = {},
 ): { apiKey: string; apiKeySource: ApiKeySource; codexHint?: string } {
+  const useCodexAuthEnvKey = context.useCodexAuthEnvKey ?? "PI_TEXT2IMAGE_USE_CODEX_AUTH";
+  const apiName = context.apiName ?? "images API";
+  const configName = context.configName ?? "text2image config";
   const wantsCodex = configured?.toLowerCase() === "codex";
   if (configured && !wantsCodex) return { apiKey: configured, apiKeySource: "config" };
 
   const fromEnv = env.OPENAI_API_KEY?.trim();
   if (!wantsCodex && fromEnv) return { apiKey: fromEnv, apiKeySource: "openai-env" };
 
-  const disabled = /^(0|false|no)$/i.test(env.PI_TEXT2IMAGE_USE_CODEX_AUTH ?? "") || files.some((file) => file.useCodexAuth === false);
+  const disabled = /^(0|false|no)$/i.test(env[useCodexAuthEnvKey] ?? "") || files.some((file) => file.useCodexAuth === false);
   if (!wantsCodex && disabled) return { apiKey: "", apiKeySource: "none" };
 
   const codex = readCodexCredential();
@@ -245,8 +300,8 @@ function resolveApiKey(
     if (wantsCodex) codexHint = `apiKey is set to "codex" but ${codex.path} does not exist — run \`codex login\` first.`;
   } else if (codex.authMode === "chatgpt") {
     codexHint =
-      `${codex.path} is a ChatGPT account login: its token is scoped to the Codex backend and the public images API rejects it ` +
-      "(403, missing scopes). Store an API key instead — `printenv OPENAI_API_KEY | codex login --with-api-key` — or set apiKey in the text2image config.";
+      `${codex.path} is a ChatGPT account login: its token is scoped to the Codex backend and the public ${apiName} rejects it ` +
+      `(403, missing scopes). Store an API key instead — \`printenv OPENAI_API_KEY | codex login --with-api-key\` — or set apiKey in the ${configName}.`;
   } else {
     codexHint = `${codex.path} holds no OPENAI_API_KEY.`;
   }
@@ -289,10 +344,12 @@ export function describeBackend(config: Text2ImageConfig, modelOverride?: string
   return { label: "openai", endpoint: `POST ${imagesEndpoint(config)}`, model: modelOverride?.trim() || config.model };
 }
 
-function apiKeyOrigin(config: Text2ImageConfig): string {
+function apiKeyOrigin(config: { apiKeySource: ApiKeySource }, where: string): string {
   switch (config.apiKeySource) {
     case "config":
-      return " (from text2image config)";
+      return ` (from ${where} config)`;
+    case "minimax-env":
+      return " (from MINIMAX_API_KEY)";
     case "openai-env":
       return " (from OPENAI_API_KEY)";
     case "codex":
@@ -336,7 +393,7 @@ export function describeConfig(config: Text2ImageConfig, cwd: string): string[] 
     `endpoint   ${imagesEndpoint(config)}`,
     `model      ${config.model}`,
     `size       ${config.size ?? "(not sent)"}`,
-    `apiKey     ${redactKey(config.apiKey)}${apiKeyOrigin(config)}`,
+    `apiKey     ${redactKey(config.apiKey)}${apiKeyOrigin(config, "text2image")}`,
     ...common,
   ];
   if (config.codexHint) lines.push(`           ${config.codexHint}`);
@@ -351,4 +408,196 @@ export function describeConfig(config: Text2ImageConfig, cwd: string): string[] 
     `project config  ${projectConfigPath(cwd)}${fs.existsSync(projectConfigPath(cwd)) ? "" : " (missing)"}`,
   );
   return lines;
+}
+
+// ----------------------------------------------------------------- video ---
+
+const VIDEO_DEFAULTS = {
+  baseUrl: "https://api.openai.com/v1",
+  model: "sora-2",
+  size: "1280x720",
+  seconds: "4",
+  outputDir: ".pi/videos",
+  // Submitting and polling are ordinary requests; the job itself is the slow part.
+  timeoutMs: 180_000,
+  // A video job runs for minutes — Sora 2 is routinely 1-5, and a busy queue is
+  // longer. This is the budget for the whole job, not for one request.
+  pollTimeoutMs: 900_000,
+  pollIntervalMs: 5_000,
+} as const;
+
+function videoProvider(value: string): VideoProvider {
+  const provider = value.trim().toLowerCase();
+  if (provider !== "openai" && provider !== "minimax") throw new Error(`unknown video provider "${value}" — use openai or minimax`);
+  return provider;
+}
+
+function minimaxBaseUrl(config: Text2VideoConfig): string {
+  return config.baseUrl.replace(/\/+$/, "").replace(/\/v[12](?:\/video_generation)?$/, "");
+}
+
+export function loadVideoConfig(cwd: string): Text2VideoConfig {
+  const user = readJson(userVideoConfigPath());
+  const project = readJson(projectVideoConfigPath(cwd));
+  const env = process.env;
+  const { pickRaw, pick, pickNumber } = createPickers(env, [project, user]);
+
+  const provider = videoProvider(pick("provider", "PI_TEXT2VIDEO_PROVIDER") ?? "openai");
+  const minimax = provider === "minimax";
+  const sizeRaw = pickRaw("size", "PI_TEXT2VIDEO_SIZE");
+  const secondsRaw = pickRaw("seconds", "PI_TEXT2VIDEO_SECONDS");
+  const baseUrl = pick("baseUrl", "PI_TEXT2VIDEO_BASE_URL") ?? (minimax ? "https://api.minimax.cn" : env.OPENAI_BASE_URL?.trim() ?? VIDEO_DEFAULTS.baseUrl);
+  const configuredKey = pick("apiKey", "PI_TEXT2VIDEO_API_KEY");
+  const { apiKey, apiKeySource, codexHint } = minimax
+    ? { apiKey: configuredKey ?? env.MINIMAX_API_KEY?.trim() ?? "", apiKeySource: (configuredKey ? "config" : env.MINIMAX_API_KEY?.trim() ? "minimax-env" : "none") as ApiKeySource, codexHint: undefined }
+    : resolveApiKey(configuredKey, env, [project, user], {
+        useCodexAuthEnvKey: "PI_TEXT2VIDEO_USE_CODEX_AUTH",
+        apiName: "videos API",
+        configName: "text2video config",
+      });
+
+  return {
+    provider,
+    baseUrl: baseUrl.replace(/\/+$/, ""),
+    apiKey,
+    apiKeySource,
+    codexHint,
+    model: pick("model", "PI_TEXT2VIDEO_MODEL") ?? (minimax ? "MiniMax-H3" : VIDEO_DEFAULTS.model),
+    size: sizeRaw === undefined ? (minimax ? "768P" : VIDEO_DEFAULTS.size) : sizeRaw || undefined,
+    seconds: secondsRaw === undefined ? (minimax ? "6" : VIDEO_DEFAULTS.seconds) : secondsRaw || undefined,
+    outputDir: pick("outputDir", "PI_TEXT2VIDEO_OUTPUT_DIR") ?? VIDEO_DEFAULTS.outputDir,
+    timeoutMs: pickNumber("timeoutMs", "PI_TEXT2VIDEO_TIMEOUT_MS") ?? VIDEO_DEFAULTS.timeoutMs,
+    pollTimeoutMs: pickNumber("pollTimeoutMs", "PI_TEXT2VIDEO_POLL_TIMEOUT_MS") ?? VIDEO_DEFAULTS.pollTimeoutMs,
+    pollIntervalMs: pickNumber("pollIntervalMs", "PI_TEXT2VIDEO_POLL_INTERVAL_MS") ?? VIDEO_DEFAULTS.pollIntervalMs,
+    responseFormat: pick("responseFormat", "PI_TEXT2VIDEO_RESPONSE_FORMAT"),
+    headers: {
+      ...(asRecord(user.headers) ?? {}),
+      ...(asRecord(project.headers) ?? {}),
+      ...(parseJsonEnv(env.PI_TEXT2VIDEO_HEADERS) ?? {}),
+    } as Record<string, string>,
+    extraBody: {
+      ...(asRecord(user.extraBody) ?? {}),
+      ...(asRecord(project.extraBody) ?? {}),
+      ...(parseJsonEnv(env.PI_TEXT2VIDEO_EXTRA_BODY) ?? {}),
+    },
+  };
+}
+
+/** A baseUrl that already points at a concrete endpoint is used as-is. */
+export function videosEndpoint(config: Text2VideoConfig): string {
+  if (config.provider === "minimax") return `${minimaxBaseUrl(config)}/v2/video_generation`;
+  return /\/videos(\/generations)?$/.test(config.baseUrl) ? config.baseUrl : `${config.baseUrl}/videos`;
+}
+
+/** Where a submitted job reports progress. */
+export function videoStatusEndpoint(config: Text2VideoConfig, id: string): string {
+  if (config.provider === "minimax") return `${minimaxBaseUrl(config)}/v2/query/video_generation/${encodeURIComponent(id)}`;
+  return `${videosEndpoint(config).replace(/\/generations$/, "")}/${encodeURIComponent(id)}`;
+}
+
+/** OpenAI's videos API keeps the finished bytes apart from the job description. */
+export function videoContentEndpoint(config: Text2VideoConfig, id: string): string {
+  return `${videoStatusEndpoint(config, id)}/content`;
+}
+
+/** Provenance for a generated clip, same contract as describeBackend(). */
+export function describeVideoBackend(config: Text2VideoConfig, modelOverride?: string): BackendDescription {
+  return { label: config.provider ?? "openai", endpoint: `POST ${videosEndpoint(config)}`, model: modelOverride?.trim() || config.model };
+}
+
+/** Lines shown by /video config. The key is always redacted. */
+export function describeVideoConfig(config: Text2VideoConfig, cwd: string): string[] {
+  const lines = [
+    config.provider === "minimax" ? "provider   minimax (H3 video generation V2)" : "provider   openai-compatible videos API (submit a job, poll it, download)",
+    `endpoint   ${videosEndpoint(config)}`,
+    `model      ${config.model}`,
+    `size       ${config.size ?? "(not sent)"}`,
+    `seconds    ${config.seconds ?? "(not sent)"}`,
+    `apiKey     ${redactKey(config.apiKey)}${apiKeyOrigin(config, "text2video")}`,
+    `outputDir  ${resolveOutputDir(cwd, config.outputDir)}`,
+    `timeout    ${Math.round(config.timeoutMs / 1000)}s per request; whole job ${Math.round(config.pollTimeoutMs / 1000)}s, polled every ${config.pollIntervalMs}ms`,
+  ];
+  if (config.codexHint) lines.push(`           ${config.codexHint}`);
+  if (config.responseFormat) lines.push(`response_format ${config.responseFormat}`);
+  const headerKeys = Object.keys(config.headers);
+  if (headerKeys.length > 0) lines.push(`headers    ${headerKeys.join(", ")}`);
+  const bodyKeys = Object.keys(config.extraBody);
+  if (bodyKeys.length > 0) lines.push(`extraBody  ${bodyKeys.join(", ")}`);
+  lines.push(
+    "",
+    `user config     ${userVideoConfigPath()}${fs.existsSync(userVideoConfigPath()) ? "" : " (missing)"}`,
+    `project config  ${projectVideoConfigPath(cwd)}${fs.existsSync(projectVideoConfigPath(cwd)) ? "" : " (missing)"}`,
+  );
+  return lines;
+}
+
+export interface VideoConfigField {
+  key: string;
+  type: "string" | "number" | "boolean" | "json";
+  description: string;
+}
+
+/** What `/video config set` accepts. Discovery-only keys (apiKeySource…) are not settable. */
+export const VIDEO_CONFIG_FIELDS: VideoConfigField[] = [
+  { key: "provider", type: "string", description: "openai or minimax" },
+  { key: "baseUrl", type: "string", description: "API base URL; the provider appends its generation endpoint" },
+  { key: "apiKey", type: "string", description: 'empty sends no Authorization header; "codex" borrows a codex API-key login' },
+  { key: "model", type: "string", description: "e.g. sora-2 or MiniMax-H3" },
+  { key: "size", type: "string", description: "OpenAI: 1280x720; MiniMax H3: 768P or 2K" },
+  { key: "seconds", type: "string", description: "clip length, e.g. 4 or 8; empty string stops sending the field" },
+  { key: "outputDir", type: "string", description: "relative to the working directory, ~ supported" },
+  { key: "timeoutMs", type: "number", description: "one HTTP request" },
+  { key: "pollTimeoutMs", type: "number", description: "the whole asynchronous job" },
+  { key: "pollIntervalMs", type: "number", description: "delay between status polls" },
+  { key: "responseFormat", type: "string", description: "rarely needed" },
+  { key: "headers", type: "json", description: "extra request headers" },
+  { key: "extraBody", type: "json", description: "merged into the submit body" },
+  { key: "useCodexAuth", type: "boolean", description: "borrow a codex API key when none is configured" },
+];
+
+export function videoConfigField(key: string): VideoConfigField | undefined {
+  return VIDEO_CONFIG_FIELDS.find((field) => field.key === key);
+}
+
+/** `/video config set` input → the JSON value written to the config file. */
+export function coerceVideoConfigValue(key: string, raw: string): unknown {
+  const field = videoConfigField(key);
+  if (!field) throw new Error(`unknown video config key "${key}" — known keys: ${VIDEO_CONFIG_FIELDS.map((entry) => entry.key).join(", ")}`);
+  if (key === "provider") return videoProvider(raw);
+  if (field.type === "number") {
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) throw new Error(`${key} must be a positive number`);
+    return value;
+  }
+  if (field.type === "boolean") {
+    if (!/^(true|false|1|0|yes|no)$/i.test(raw.trim())) throw new Error(`${key} must be true or false`);
+    return /^(true|1|yes)$/i.test(raw.trim());
+  }
+  if (field.type === "json") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(`${key} must be a JSON object`);
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${key} must be a JSON object`);
+    return parsed;
+  }
+  return raw;
+}
+
+/** Merge-write a config file, creating it (and its directory) if needed. */
+export function writeConfigPatch(target: string, patch: Record<string, unknown>): { path: string; before: Record<string, unknown>; after: Record<string, unknown> } {
+  const before = readJson(target);
+  const after = { ...before, ...patch };
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, `${JSON.stringify(after, null, 2)}\n`);
+  return { path: target, before, after };
+}
+
+/** One line per changed key, for a confirmation dialog and a result card. */
+export function describeChanges(before: Record<string, unknown>, after: Record<string, unknown>): string[] {
+  return Object.keys(after)
+    .filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]))
+    .map((key) => `${key}: ${before[key] === undefined ? "" : `${JSON.stringify(before[key])} → `}${JSON.stringify(after[key])}`);
 }

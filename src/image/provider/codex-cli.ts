@@ -13,10 +13,12 @@
 
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import { imageFromFile } from "../media.ts";
+import type { GenerateOptions, GeneratedImage } from "../types.ts";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { codexGeneratedImagesDir, codexHome, type Text2ImageConfig } from "./config.ts";
+import { codexGeneratedImagesDir, codexHome, type Text2ImageConfig } from "../../config.ts";
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 // mtime granularity plus the gap between our clock read and the first write.
@@ -166,4 +168,13 @@ export async function generateImagesWithCodex(options: CodexRunOptions): Promise
   } finally {
     fs.rmSync(workdir, { recursive: true, force: true });
   }
+}
+
+/** Adapt this provider to the common in-memory image result. */
+export async function generateWithCodexCli(options: GenerateOptions): Promise<GeneratedImage[]> {
+  const { config } = options;
+  const n = Math.min(Math.max(options.n ?? 1, 1), 10);
+  const size = options.size?.trim() || config.size;
+  const results = await generateImagesWithCodex({ config, prompt: options.prompt, n, size, signal: options.signal });
+  return results.map(imageFromFile);
 }

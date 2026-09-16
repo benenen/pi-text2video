@@ -145,7 +145,7 @@ console.log("✓ 401 triggers a refresh and one retry");
 
 // Where the client id comes from: config → id_token audience → the known Codex id
 {
-  const { resolveClientId, readCodexTokens } = await loader.import("src/codex-api.ts");
+  const { resolveClientId, readCodexTokens } = await loader.import("src/image/provider/codex-api.ts");
   assert.equal(resolveClientId(config, readCodexTokens()), "app_from_id_token");
   assert.equal(resolveClientId({ ...config, codexClientId: "app_explicit" }, readCodexTokens()), "app_explicit");
   // Codex's own override env var, honoured under its real name

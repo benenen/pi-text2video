@@ -92,3 +92,73 @@ export async function startFakeImagesApi() {
   const port = server.address().port;
   return { port, requests, pngBuffer, baseUrl: `http://127.0.0.1:${port}/v1`, close: () => server.close() };
 }
+
+/**
+ * A fake asynchronous videos service: `POST /v1/videos` starts a job,
+ * `GET /v1/videos/{id}` reports progress, `GET /v1/videos/{id}/content` serves
+ * the bytes — OpenAI's shape. The model field picks the behaviour.
+ */
+export async function startFakeVideosApi() {
+  const http = await import("node:http");
+  // "ftyp" at offset 4 is what makes a buffer look like an mp4.
+  const mp4Buffer = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypisom"), Buffer.from([0, 0, 2, 0]), Buffer.from("isomiso2mp41"), Buffer.alloc(4)]);
+  const requests = [];
+  const jobs = new Map();
+  let nextId = 1;
+
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://127.0.0.1");
+    const json = (code, payload) => {
+      res.writeHead(code, { "content-type": "application/json" });
+      res.end(JSON.stringify(payload));
+    };
+
+    if (req.method === "GET" && url.pathname === "/clip.mp4") {
+      // octet-stream on purpose: the client has to sniff the bytes.
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      res.end(mp4Buffer);
+      return;
+    }
+
+    const jobMatch = url.pathname.match(/^\/v1\/videos\/([^/]+)(\/content)?$/);
+    if (req.method === "GET" && jobMatch) {
+      const job = jobs.get(jobMatch[1]);
+      if (!job) return json(404, { error: { message: "no such job" } });
+      if (jobMatch[2]) {
+        res.writeHead(200, { "content-type": "video/mp4" });
+        res.end(mp4Buffer);
+        return;
+      }
+      requests.push({ method: "GET", url: url.pathname, id: job.id });
+      job.polls += 1;
+      if (job.model === "fail") return json(200, { id: job.id, status: "failed", error: { message: "prompt rejected" } });
+      if (job.model === "slow" || job.polls < 2) return json(200, { id: job.id, status: "in_progress", progress: 50 });
+      return json(200, { id: job.id, status: "completed", progress: 100 });
+    }
+
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      const parsed = JSON.parse(body || "{}");
+      requests.push({ method: req.method, url: url.pathname, headers: req.headers, body: parsed });
+      switch (parsed.model) {
+        case "unauthorized":
+          return json(401, { error: { message: "invalid api key" } });
+        case "junk":
+          return json(200, { foo: 1 });
+        case "sync":
+          return json(200, { data: [{ url: `http://127.0.0.1:${port}/clip.mp4` }] });
+        case "b64":
+          return json(200, { videos: [{ b64_json: mp4Buffer.toString("base64") }] });
+        default: {
+          const id = `vid-${nextId++}`;
+          jobs.set(id, { id, model: parsed.model, polls: 0 });
+          return json(200, { id, status: "queued", progress: 0 });
+        }
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  return { port, requests, mp4Buffer, baseUrl: `http://127.0.0.1:${port}/v1`, close: () => server.close() };
+}

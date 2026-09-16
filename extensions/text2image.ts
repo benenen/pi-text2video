@@ -1,14 +1,4 @@
-// Text-to-image for pi, backed by any OpenAI-compatible images API.
-//
-// Two entry points with different jobs:
-//   - the generate_image tool: the model decides when to draw ("throw in an icon
-//     for this"), and the result joins the LLM context;
-//   - the /image command: a human draws on purpose, and the result only reaches
-//     the TUI (appendEntry stays out of context) — no context burned on a picture.
-//
-// Files are written to disk either way: inline previews need a terminal that
-// speaks the kitty or iTerm2 image protocol, so the saved file is the only
-// dependable artifact and its absolute path always appears in the text.
+// Text-to-image for pi: generate_image enters model context; /image stays in the TUI.
 
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, getCapabilities, Image, Text } from "@earendil-works/pi-tui";
@@ -17,8 +7,9 @@ import * as path from "node:path";
 import { Type } from "typebox";
 
 import { applyCodexImport, describeChanges, planCodexImport } from "../src/codex-import.ts";
-import { describeBackend, describeConfig, loadConfig, resolveOutputDir, type Text2ImageConfig } from "../src/config.ts";
+import { describeBackend, describeConfig, loadConfig, resolveOutputDir } from "../src/config.ts";
 import { formatBytes, generateImages, saveImages, type SavedImage } from "../src/images.ts";
+import { errorMessage, registerInfoRenderer, type InfoEntryData } from "./lib/ui.ts";
 
 // Budget for inlining into the LLM context. A 1024x1024 PNG is ~2MB once base64
 // encoded, so a handful of them blows up the context: only the first few are
@@ -59,11 +50,6 @@ interface ImageEntryData {
   elapsedMs: number;
 }
 
-interface InfoEntryData {
-  title: string;
-  lines: string[];
-}
-
 function toImageFile(saved: SavedImage): ImageFile {
   return { path: saved.path, mimeType: saved.mimeType, bytes: saved.bytes, width: saved.width, height: saved.height };
 }
@@ -72,10 +58,6 @@ function toImageFile(saved: SavedImage): ImageFile {
 function fileSummary(file: ImageFile): string {
   const dimensions = file.width && file.height ? `${file.width}×${file.height}, ` : "";
   return `${file.path} (${dimensions}${formatBytes(file.bytes)})`;
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /** The kitty protocol only accepts PNG — pi's built-in renderer makes the same check. */
@@ -161,6 +143,7 @@ export default function (pi: ExtensionAPI) {
       const count = params.n ?? 1;
 
       onUpdate?.({
+        details: undefined,
         content: [{ type: "text", text: `Generating ${count} image(s) with ${backend.label} (${backend.model})${size ? ` at ${size}` : ""}…` }],
       });
 
@@ -264,13 +247,7 @@ export default function (pi: ExtensionAPI) {
     return box;
   });
 
-  pi.registerEntryRenderer<InfoEntryData>("text2image-info", (entry, _options, theme) => {
-    const data = entry.data;
-    if (!data) return undefined;
-    const box = new Box(1, 0, (text) => theme.bg("customMessageBg", text));
-    box.addChild(new Text(`${theme.fg("customMessageLabel", data.title)}\n${theme.fg("dim", data.lines.join("\n"))}`, 0, 0));
-    return box;
-  });
+  registerInfoRenderer(pi, "text2image-info");
 
   // ---- manual entry point ----
   pi.registerCommand("image", {

@@ -32,11 +32,12 @@ factory({
 assert.deepEqual(tools.map((tool) => tool.name), ["generate_image"]);
 assert.deepEqual([...commands.keys()], ["image"]);
 assert.deepEqual([...renderers.keys()].sort(), ["text2image", "text2image-info"]);
-console.log("✓ registers 1 tool, 1 command, 2 renderers");
+console.log("✓ registers only the image tool, command and renderers");
 
 const theme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text, italic: (text) => text };
 const notices = [];
 const statuses = [];
+let confirmAnswer = true;
 const makeCtx = (input) => ({
   cwd,
   hasUI: true,
@@ -45,6 +46,7 @@ const makeCtx = (input) => ({
     notify: (message, level) => notices.push({ message, level }),
     setStatus: (key, text) => statuses.push({ key, text }),
     input: async () => "dialog prompt",
+    confirm: async () => confirmAnswer,
   },
 });
 
@@ -88,7 +90,8 @@ console.log("✓ tool inlines the first 2 images for a vision model");
 
 // Renderers
 assert.match(tool.renderCall({ prompt: "a red panda", size: "1024x1024", n: 2 }, theme, {}).render(80).join(""), /generate_image/);
-const rendered = tool.renderResult(result, { expanded: false, isPartial: false }, theme, { showImages: true }).render(80).join("\n");
+// Long temporary paths wrap at terminal width; join the visible path fragments.
+const rendered = tool.renderResult(result, { expanded: false, isPartial: false }, theme, { showImages: true }).render(80).map((line) => line.trim()).join("");
 assert.ok(rendered.includes("3 image(s)") && rendered.includes(result.details.files[0].path));
 assert.ok(rendered.includes("openai") && rendered.includes("/v1/images/generations"), "the rendered result names the backend");
 assert.ok(rendered.includes("1×1"), "the rendered result shows real pixels");
@@ -134,6 +137,7 @@ assert.match(notices.at(-1).message, /Text-to-image failed[\s\S]*401/);
 assert.equal(statuses.at(-1).text, undefined);
 console.log("✓ /image reports failure and clears status");
 
+
 api.close();
 fs.rmSync(cwd, { recursive: true, force: true });
-console.log("extension.test.mjs passed\n");
+console.log("image-extension.test.mjs passed\n");

@@ -7,11 +7,11 @@
 //   - ChatGPT login  → provider "codex", plus the first image-capable model the
 //     account actually accepts, found by probing.
 
-import * as fs from "node:fs";
-import * as path from "node:path";
+import { probeCodexModel } from "./image/provider/codex-api.ts";
+import { codexAuthPath, projectConfigPath, readCodexCredential, userConfigPath, writeConfigPatch, type Text2ImageConfig } from "./config.ts";
 
-import { probeCodexModel } from "./codex-api.ts";
-import { codexAuthPath, projectConfigPath, readCodexCredential, userConfigPath, type Text2ImageConfig } from "./config.ts";
+/** Re-exported here because the import flow has always exposed it from this module. */
+export { describeChanges } from "./config.ts";
 import { describeProxy, proxyForUrl, resolveProxySettings } from "./proxy-env.ts";
 
 /** Tried in order; the configured model goes first. */
@@ -99,22 +99,5 @@ export async function planCodexImport(options: ImportOptions): Promise<ImportPla
 
 /** Merges the patch into whatever is already there and writes it back. */
 export function applyCodexImport(plan: ImportPlan): { path: string; before: Record<string, unknown>; after: Record<string, unknown> } {
-  let before: Record<string, unknown> = {};
-  try {
-    const parsed = JSON.parse(fs.readFileSync(plan.target, "utf-8"));
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) before = parsed as Record<string, unknown>;
-  } catch {
-    // no readable file yet
-  }
-  const after = { ...before, ...plan.patch };
-  fs.mkdirSync(path.dirname(plan.target), { recursive: true });
-  fs.writeFileSync(plan.target, `${JSON.stringify(after, null, 2)}\n`);
-  return { path: plan.target, before, after };
-}
-
-/** One line per changed key, for the confirmation dialog and the result card. */
-export function describeChanges(before: Record<string, unknown>, after: Record<string, unknown>): string[] {
-  return Object.keys(after)
-    .filter((key) => JSON.stringify(before[key]) !== JSON.stringify(after[key]))
-    .map((key) => `${key}: ${before[key] === undefined ? "" : `${JSON.stringify(before[key])} → `}${JSON.stringify(after[key])}`);
+  return writeConfigPatch(plan.target, plan.patch);
 }
