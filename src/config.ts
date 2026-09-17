@@ -1,10 +1,8 @@
 // Configuration resolution. Precedence, highest first:
 // environment variables → project config → user config → defaults.
 //
-// Only one protocol is supported here: the OpenAI-compatible images API
-// (POST {baseUrl}/images/generations). OpenAI itself, SiliconFlow, an internal
-// gateway, one-api / self-hosted vLLM all speak it. Vendor-specific knobs are
-// passed through via extraBody instead of being modelled one by one.
+// Images support OpenAI-compatible APIs, Codex and MiniMax. Vendor-specific
+// knobs are passed through via extraBody.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -12,6 +10,7 @@ import * as path from "node:path";
 
 export interface Text2ImageConfig {
   /**
+   * "minimax": call the MiniMax image_generation API.
    * "openai": talk to an OpenAI-compatible images API with a key.
    * "codex": drive `codex exec` so an existing Codex login generates the image
    * with its server-side built-in image_gen tool — no API key involved.
@@ -48,7 +47,7 @@ export interface Text2ImageConfig {
   extraBody: Record<string, unknown>;
 }
 
-export type Provider = "openai" | "codex";
+export type Provider = "openai" | "codex" | "minimax";
 
 /**
  * "api" (default): read the tokens from auth.json and call the Codex backend
@@ -223,13 +222,18 @@ export function loadConfig(cwd: string): Text2ImageConfig {
   const env = process.env;
   const { pickRaw, pick, pickNumber } = createPickers(env, [project, user]);
 
-  const provider: Provider = (pick("provider", "PI_TEXT2IMAGE_PROVIDER") ?? "openai").toLowerCase() === "codex" ? "codex" : "openai";
+  const providerName = (pick("provider", "PI_TEXT2IMAGE_PROVIDER") ?? "openai").toLowerCase();
+  const provider: Provider = providerName === "minimax" ? "minimax" : providerName === "codex" ? "codex" : "openai";
+  const minimax = provider === "minimax";
+  const configuredKey = pick("apiKey", "PI_TEXT2IMAGE_API_KEY");
   const codexMode: CodexMode = (pick("codexMode", "PI_TEXT2IMAGE_CODEX_MODE") ?? "api").toLowerCase() === "cli" ? "cli" : "api";
   const sizeRaw = pickRaw("size", "PI_TEXT2IMAGE_SIZE");
-  const baseUrl = pick("baseUrl", "PI_TEXT2IMAGE_BASE_URL") ?? env.OPENAI_BASE_URL?.trim() ?? DEFAULTS.baseUrl;
+  const baseUrl = pick("baseUrl", "PI_TEXT2IMAGE_BASE_URL") ?? (minimax ? "https://api.minimax.cn/v1" : env.OPENAI_BASE_URL?.trim() ?? DEFAULTS.baseUrl);
   // The codex provider carries no key at all: the Codex session owns the auth.
   const { apiKey, apiKeySource, codexHint } =
-    provider === "codex" ? { apiKey: "", apiKeySource: "none" as const, codexHint: undefined } : resolveApiKey(pick("apiKey", "PI_TEXT2IMAGE_API_KEY"), env, [project, user]);
+    provider === "codex" ? { apiKey: "", apiKeySource: "none" as const, codexHint: undefined } : minimax
+      ? { apiKey: configuredKey ?? env.MINIMAX_API_KEY?.trim() ?? "", apiKeySource: (configuredKey ? "config" : env.MINIMAX_API_KEY?.trim() ? "minimax-env" : "none") as ApiKeySource, codexHint: undefined }
+      : resolveApiKey(configuredKey, env, [project, user]);
 
   return {
     provider,
@@ -237,8 +241,8 @@ export function loadConfig(cwd: string): Text2ImageConfig {
     apiKey,
     apiKeySource,
     codexHint,
-    model: pick("model", "PI_TEXT2IMAGE_MODEL") ?? DEFAULTS.model,
-    size: sizeRaw === undefined ? DEFAULTS.size : sizeRaw || undefined,
+    model: pick("model", "PI_TEXT2IMAGE_MODEL") ?? (minimax ? "image-01" : DEFAULTS.model),
+    size: sizeRaw === undefined ? (minimax ? undefined : DEFAULTS.size) : sizeRaw || undefined,
     outputDir: pick("outputDir", "PI_TEXT2IMAGE_OUTPUT_DIR") ?? DEFAULTS.outputDir,
     // A codex turn is a whole agent run, not one HTTP call: minutes, not seconds.
     timeoutMs:
@@ -310,6 +314,7 @@ function resolveApiKey(
 
 /** A baseUrl that already points at a concrete endpoint is used as-is. */
 export function imagesEndpoint(config: Text2ImageConfig): string {
+  if (config.provider === "minimax") return `${config.baseUrl.replace(/\/(?:v1(?:\/image_generation)?|image_generation)$/, "")}/v1/image_generation`;
   return /\/images\/(generations|edits)$/.test(config.baseUrl) ? config.baseUrl : `${config.baseUrl}/images/generations`;
 }
 
@@ -341,7 +346,7 @@ export function describeBackend(config: Text2ImageConfig, modelOverride?: string
       ? { label: "codex/api", endpoint: `POST ${config.codexBaseUrl}/responses (tool: image_generation)`, model: config.codexApiModel }
       : { label: "codex/cli", endpoint: `${config.codexCommand} exec (tool: image_gen)`, model: config.codexModel ?? "codex default" };
   }
-  return { label: "openai", endpoint: `POST ${imagesEndpoint(config)}`, model: modelOverride?.trim() || config.model };
+  return { label: config.provider, endpoint: `POST ${imagesEndpoint(config)}`, model: modelOverride?.trim() || config.model };
 }
 
 function apiKeyOrigin(config: { apiKeySource: ApiKeySource }, where: string): string {
@@ -389,7 +394,7 @@ export function describeConfig(config: Text2ImageConfig, cwd: string): string[] 
     ];
   }
   const lines = [
-    "provider   openai-compatible images API",
+    config.provider === "minimax" ? "provider   minimax (image generation)" : "provider   openai-compatible images API",
     `endpoint   ${imagesEndpoint(config)}`,
     `model      ${config.model}`,
     `size       ${config.size ?? "(not sent)"}`,

@@ -67,7 +67,7 @@ Images read `~/.pi/agent/text2image.json` (user) and `./.pi/text2image.json` (pr
 
 | Field | Environment variable | Default | Notes |
 | --- | --- | --- | --- |
-| `provider` | `PI_TEXT2IMAGE_PROVIDER` | `openai` | `openai` or `codex`; the fields below marked *(openai)* only apply to the former |
+| `provider` | `PI_TEXT2IMAGE_PROVIDER` | `openai` | `openai`, `codex` or `minimax`; see MiniMax image configuration below |
 | `baseUrl` *(openai)* | `PI_TEXT2IMAGE_BASE_URL` | `https://api.openai.com/v1` | `/images/generations` is appended; a full endpoint is also accepted |
 | `apiKey` *(openai)* | `PI_TEXT2IMAGE_API_KEY` | empty | when empty no `Authorization` header is sent (common for internal gateways) |
 | `model` *(openai)* | `PI_TEXT2IMAGE_MODEL` | `gpt-image-1` | |
@@ -103,6 +103,31 @@ Examples:
 // Internal OpenAI-compatible gateway, no key
 { "baseUrl": "http://172.31.0.1:16777/v1", "apiKey": "", "model": "flux-dev", "timeoutMs": 300000 }
 ```
+
+### MiniMax images
+
+Set `.pi/text2image.json` (project) or `~/.pi/agent/text2image.json` (user):
+
+```json
+{
+  "provider": "minimax",
+  "baseUrl": "https://api.minimax.cn/v1",
+  "model": "image-01",
+  "size": "16:9",
+  "responseFormat": "base64",
+  "extraBody": { "prompt_optimizer": false }
+}
+```
+
+Supply `MINIMAX_API_KEY`, or override it with `PI_TEXT2IMAGE_API_KEY` / the image config's `apiKey`. MiniMax never borrows OpenAI or Codex credentials. The endpoint is `/v1/image_generation`; a host, `/v1` base URL or full endpoint is accepted. For global accounts use `https://api.minimax.io/v1`. Explicit settings inherited from another provider remain in effect, so update model, URL and response format together when switching.
+
+Use `/image a cat --size 16:9` or the `generate_image` tool. `size` accepts an aspect ratio or pixel dimensions such as `1024x768`; dimensions must be multiples of 8 between 512 and 2048. With no size, the API defaults to square images; `extraBody.aspect_ratio` or `width`/`height` can also supply sizing. An explicit size overrides these extra fields. Supported ratios: `1:1`, `16:9`, `4:3`, `3:2`, `2:3`, `3:4`, `9:16`, `21:9`.
+
+The backend defaults to `image-01` and base64 output, and also downloads URL responses. Each invocation submits one generation request (1–9 images; the agent tool allows up to 4), then saves images locally. Prompts are limited to 1500 characters. API errors inside HTTP 200 responses are reported as failures.
+
+`prompt_optimizer` defaults to `false` in this extension. Set `extraBody.prompt_optimizer` to `true` to enable MiniMax's server-side optimization within the same image request. No H3 or separate prompt optimization endpoint is called. Other vendor parameters such as `seed` can be passed through `extraBody`.
+
+References: [image generation guide](https://platform.minimax.cn/docs/guides/image-generation), [API parameters](https://platform.minimax.io/docs/api-reference/image-generation-t2i).
 
 ### Borrowing a codex API key (provider `openai`)
 

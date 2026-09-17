@@ -117,7 +117,7 @@ export default function (pi: ExtensionAPI) {
         "What to draw, in English unless the user asked otherwise. Be specific about subject, style, composition and lighting — these models follow detailed prompts much better than short ones.",
     }),
     n: Type.Optional(Type.Integer({ minimum: 1, maximum: 4, description: "How many images to generate. Defaults to 1." })),
-    size: Type.Optional(Type.String({ description: "Image size, e.g. 1024x1024, 1536x1024, 1024x1536. Defaults to the configured size." })),
+    size: Type.Optional(Type.String({ description: "Image size (MiniMax also accepts aspect ratios such as 16:9), e.g. 1024x1024, 1536x1024, 1024x1536. Defaults to the configured size." })),
     model: Type.Optional(Type.String({ description: "Override the configured image model. Only set this when the user named a model." })),
     filename: Type.Optional(Type.String({ description: "Slug used in the saved file name. Defaults to a slug of the prompt." })),
   });

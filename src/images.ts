@@ -1,6 +1,7 @@
 // Image provider dispatch and saving generated files to disk.
 import * as fs from "node:fs";
 import { slugify, timestamp, uniquePath } from "./files.ts";
+import { generateWithMiniMax } from "./image/provider/minimax.ts";
 import { generateWithOpenAI } from "./image/provider/openai.ts";
 import { generateWithCodexApi } from "./image/provider/codex-api.ts";
 import { generateWithCodexCli } from "./image/provider/codex-cli.ts";
@@ -12,6 +13,7 @@ export type { GeneratedImage, SavedImage, GenerateOptions } from "./image/types.
 
 /** All providers return images in memory; saving is independent of the backend. */
 export async function generateImages(options: GenerateOptions): Promise<GeneratedImage[]> {
+  if (options.config.provider === "minimax") return generateWithMiniMax(options);
   if (options.config.provider !== "codex") return generateWithOpenAI(options);
   return options.config.codexMode === "api" ? generateWithCodexApi(options) : generateWithCodexCli(options);
 }
