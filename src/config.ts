@@ -45,6 +45,14 @@ export interface Text2ImageConfig {
   codexRefresh: boolean;
   /** Merged into the request body verbatim — negative_prompt, guidance_scale and friends. */
   extraBody: Record<string, unknown>;
+  /**
+   * Proxy for this API only. $CODEX_HOME/.env belongs to the Codex CLI and is
+   * read by the codex provider alone, so an OpenAI-compatible gateway behind a
+   * proxy has to say so here (or in the process environment).
+   */
+  httpProxy?: string;
+  httpsProxy?: string;
+  noProxy?: string;
 }
 
 export type Provider = "openai" | "codex" | "minimax";
@@ -58,7 +66,7 @@ export type Provider = "openai" | "codex" | "minimax";
  */
 export type CodexMode = "cli" | "api";
 
-export type ApiKeySource = "config" | "openai-env" | "minimax-env" | "codex" | "none";
+export type ApiKeySource = "config" | "openai-env" | "minimax-env" | "text2video-env" | "codex" | "none";
 
 /**
  * Video generation is a second, independent backend. It gets its own config file
@@ -93,6 +101,10 @@ export interface Text2VideoConfig {
   headers: Record<string, string>;
   /** Merged into the submit body verbatim — aspect_ratio, negative_prompt and friends. */
   extraBody: Record<string, unknown>;
+  /** Proxy for this API only — see Text2ImageConfig. Unset means direct unless the process environment says otherwise. */
+  httpProxy?: string;
+  httpsProxy?: string;
+  noProxy?: string;
 }
 
 export interface CodexCredential {
@@ -208,6 +220,14 @@ function createPickers(env: NodeJS.ProcessEnv, files: Record<string, unknown>[])
   return {
     pickRaw,
     pick: (key: string, envKey: string): string | undefined => pickRaw(key, envKey) || undefined,
+    /** The config files only — for telling an env-provided secret apart from a stored one. */
+    pickFile: (key: string): string | undefined => {
+      for (const source of files) {
+        const value = source[key];
+        if (typeof value === "string") return value.trim();
+      }
+      return undefined;
+    },
     pickNumber: (key: string, envKey: string): number | undefined => {
       const fromFiles = files.map((source) => (typeof source[key] === "number" ? String(source[key]) : undefined)).find((value) => value !== undefined);
       const value = Number(pickRaw(key, envKey) || fromFiles);
@@ -270,6 +290,9 @@ export function loadConfig(cwd: string): Text2ImageConfig {
       ...(asRecord(project.extraBody) ?? {}),
       ...(parseJsonEnv(env.PI_TEXT2IMAGE_EXTRA_BODY) ?? {}),
     },
+    httpProxy: pick("httpProxy", "PI_TEXT2IMAGE_HTTP_PROXY"),
+    httpsProxy: pick("httpsProxy", "PI_TEXT2IMAGE_HTTPS_PROXY"),
+    noProxy: pick("noProxy", "PI_TEXT2IMAGE_NO_PROXY"),
   };
 }
 
@@ -355,6 +378,8 @@ function apiKeyOrigin(config: { apiKeySource: ApiKeySource }, where: string): st
       return ` (from ${where} config)`;
     case "minimax-env":
       return " (from MINIMAX_API_KEY)";
+    case "text2video-env":
+      return " (from PI_TEXT2VIDEO_API_KEY)";
     case "openai-env":
       return " (from OPENAI_API_KEY)";
     case "codex":
@@ -445,21 +470,31 @@ export function loadVideoConfig(cwd: string): Text2VideoConfig {
   const user = readJson(userVideoConfigPath());
   const project = readJson(projectVideoConfigPath(cwd));
   const env = process.env;
-  const { pickRaw, pick, pickNumber } = createPickers(env, [project, user]);
+  const { pickRaw, pick, pickFile, pickNumber } = createPickers(env, [project, user]);
 
   const provider = videoProvider(pick("provider", "PI_TEXT2VIDEO_PROVIDER") ?? "openai");
   const minimax = provider === "minimax";
   const sizeRaw = pickRaw("size", "PI_TEXT2VIDEO_SIZE");
   const secondsRaw = pickRaw("seconds", "PI_TEXT2VIDEO_SECONDS");
   const baseUrl = pick("baseUrl", "PI_TEXT2VIDEO_BASE_URL") ?? (minimax ? "https://api.minimax.cn" : env.OPENAI_BASE_URL?.trim() ?? VIDEO_DEFAULTS.baseUrl);
-  const configuredKey = pick("apiKey", "PI_TEXT2VIDEO_API_KEY");
-  const { apiKey, apiKeySource, codexHint } = minimax
-    ? { apiKey: configuredKey ?? env.MINIMAX_API_KEY?.trim() ?? "", apiKeySource: (configuredKey ? "config" : env.MINIMAX_API_KEY?.trim() ? "minimax-env" : "none") as ApiKeySource, codexHint: undefined }
+  const envApiKey = (env.PI_TEXT2VIDEO_API_KEY ?? "").trim();
+  const fileApiKey = pickFile("apiKey");
+  const configuredKey = envApiKey || fileApiKey;
+  const resolved = minimax
+    ? {
+        apiKey: configuredKey || env.MINIMAX_API_KEY?.trim() || "",
+        apiKeySource: (envApiKey ? "text2video-env" : fileApiKey ? "config" : env.MINIMAX_API_KEY?.trim() ? "minimax-env" : "none") as ApiKeySource,
+        codexHint: undefined as string | undefined,
+      }
     : resolveApiKey(configuredKey, env, [project, user], {
         useCodexAuthEnvKey: "PI_TEXT2VIDEO_USE_CODEX_AUTH",
         apiName: "videos API",
         configName: "text2video config",
       });
+  const { apiKey, codexHint } = resolved;
+  // resolveApiKey reports any configured key as "config"; one that came from the
+  // environment deserves its own label, since that is where the user set it.
+  const apiKeySource = !minimax && envApiKey && resolved.apiKeySource === "config" ? ("text2video-env" as ApiKeySource) : resolved.apiKeySource;
 
   return {
     provider,
@@ -485,6 +520,9 @@ export function loadVideoConfig(cwd: string): Text2VideoConfig {
       ...(asRecord(project.extraBody) ?? {}),
       ...(parseJsonEnv(env.PI_TEXT2VIDEO_EXTRA_BODY) ?? {}),
     },
+    httpProxy: pick("httpProxy", "PI_TEXT2VIDEO_HTTP_PROXY"),
+    httpsProxy: pick("httpsProxy", "PI_TEXT2VIDEO_HTTPS_PROXY"),
+    noProxy: pick("noProxy", "PI_TEXT2VIDEO_NO_PROXY"),
   };
 }
 
@@ -557,6 +595,9 @@ export const VIDEO_CONFIG_FIELDS: VideoConfigField[] = [
   { key: "responseFormat", type: "string", description: "rarely needed" },
   { key: "headers", type: "json", description: "extra request headers" },
   { key: "extraBody", type: "json", description: "merged into the submit body" },
+  { key: "httpProxy", type: "string", description: "proxy for this API only; unset means direct" },
+  { key: "httpsProxy", type: "string", description: "proxy for this API only; unset means direct" },
+  { key: "noProxy", type: "string", description: "comma-separated hosts to reach directly, or * for everything" },
   { key: "useCodexAuth", type: "boolean", description: "borrow a codex API key when none is configured" },
 ];
 

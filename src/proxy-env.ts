@@ -4,12 +4,17 @@
 // that file is the only place it is configured — pi's own process never sees
 // those variables. Node's fetch ignores HTTPS_PROXY anyway (undici needs an
 // explicit dispatcher), so both the proxy lookup and the tunnelling are ours to
-// do. Precedence: explicit config → $CODEX_HOME/.env → process environment.
+// do.
+//
+// That file belongs to the Codex CLI, so only requests aimed at the Codex
+// backend consult it. The media APIs (images, videos, MiniMax) resolve their
+// proxy from their own config and the process environment — inheriting the Codex
+// proxy silently sent metaso.cn through a tunnel it had no business using.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { codexHome } from "./config.ts";
+import { codexHome, videosEndpoint, type Text2VideoConfig } from "./config.ts";
 
 export interface ProxySettings {
   httpProxy?: string;
@@ -17,6 +22,15 @@ export interface ProxySettings {
   noProxy?: string;
   /** Where the values came from, for /image config. */
   source: "config" | "codex-env" | "environment" | "none";
+}
+
+export interface ProxyResolutionOptions {
+  /**
+   * Also consult $CODEX_HOME/.env. That file configures the Codex CLI, so only
+   * the Codex backend should answer yes here; every other API resolves its proxy
+   * from its own config and the process environment.
+   */
+  includeCodexEnv?: boolean;
 }
 
 /** Minimal dotenv: KEY=VALUE, optional quotes, # comments, `export ` prefix. */
@@ -57,16 +71,18 @@ function pickEnv(source: Record<string, string | undefined>, ...names: string[])
   return undefined;
 }
 
-export function resolveProxySettings(explicit?: { httpProxy?: string; httpsProxy?: string; noProxy?: string }): ProxySettings {
-  if (explicit?.httpProxy || explicit?.httpsProxy) return { ...explicit, source: "config" };
+export function resolveProxySettings(explicit?: { httpProxy?: string; httpsProxy?: string; noProxy?: string }, options: ProxyResolutionOptions = {}): ProxySettings {
+  if (explicit?.httpProxy?.trim() || explicit?.httpsProxy?.trim() || explicit?.noProxy?.trim()) return { ...explicit, source: "config" };
 
-  const codexEnv = readCodexEnv();
-  const fromCodex = {
-    httpProxy: pickEnv(codexEnv, "HTTP_PROXY"),
-    httpsProxy: pickEnv(codexEnv, "HTTPS_PROXY"),
-    noProxy: pickEnv(codexEnv, "NO_PROXY"),
-  };
-  if (fromCodex.httpProxy || fromCodex.httpsProxy) return { ...fromCodex, source: "codex-env" };
+  if (options.includeCodexEnv ?? true) {
+    const codexEnv = readCodexEnv();
+    const fromCodex = {
+      httpProxy: pickEnv(codexEnv, "HTTP_PROXY"),
+      httpsProxy: pickEnv(codexEnv, "HTTPS_PROXY"),
+      noProxy: pickEnv(codexEnv, "NO_PROXY"),
+    };
+    if (fromCodex.httpProxy || fromCodex.httpsProxy) return { ...fromCodex, source: "codex-env" };
+  }
 
   const fromEnv = {
     httpProxy: pickEnv(process.env, "HTTP_PROXY"),
@@ -76,6 +92,28 @@ export function resolveProxySettings(explicit?: { httpProxy?: string; httpsProxy
   if (fromEnv.httpProxy || fromEnv.httpsProxy) return { ...fromEnv, source: "environment" };
 
   return { source: "none" };
+}
+
+export interface ProxyFields {
+  httpProxy?: string;
+  httpsProxy?: string;
+  noProxy?: string;
+}
+
+/**
+ * The proxy in effect for a media request: the extension's own proxy fields
+ * (config file or PI_TEXT2IMAGE_*_PROXY / PI_TEXT2VIDEO_*_PROXY), then the
+ * process environment. $CODEX_HOME/.env is deliberately not consulted — that
+ * file configures the Codex CLI, and only the codex provider should see it.
+ */
+export function mediaProxySettings(config: ProxyFields): ProxySettings {
+  return resolveProxySettings({ httpProxy: config.httpProxy, httpsProxy: config.httpsProxy, noProxy: config.noProxy }, { includeCodexEnv: false });
+}
+
+/** One line for /video config, so "which proxy is this using?" has an answer. */
+export function describeVideoProxy(config: Text2VideoConfig): string {
+  const settings = mediaProxySettings(config);
+  return `${describeProxy(proxyForUrl(new URL(videosEndpoint(config)), settings))} (${settings.source})`;
 }
 
 /** NO_PROXY semantics: comma-separated hosts, leading dot or bare suffix match, `*` for everything. */

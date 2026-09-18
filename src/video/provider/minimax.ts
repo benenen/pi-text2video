@@ -1,9 +1,10 @@
-// MiniMax H3 V2: submit a text prompt, poll the task, download its signed URL.
+// MiniMax H3 V2: submit text and optional frame images, poll, download the original video.
 // https://platform.minimax.io/docs/api-reference/video-generation-v2-create
 import { setTimeout as delay } from "node:timers/promises";
 import { videosEndpoint, videoStatusEndpoint, type Text2VideoConfig } from "../../config.ts";
 import { request } from "../../http.ts";
-import { proxyForUrl, resolveProxySettings } from "../../proxy-env.ts";
+import { mediaProxySettings, proxyForUrl } from "../../proxy-env.ts";
+import { resolveVideoMedia } from "../media-input.ts";
 import { extFor, videoMimeType } from "../media.ts";
 import type { GeneratedVideo, GenerateVideoOptions } from "../types.ts";
 
@@ -14,8 +15,8 @@ interface MiniMaxResponse {
   task?: { status?: string; content?: { url?: string }; error?: { code?: string | number; message?: string } };
 }
 
-function proxyFor(url: string): URL | undefined {
-  return proxyForUrl(new URL(url), resolveProxySettings());
+function proxyFor(url: string, config: Text2VideoConfig): URL | undefined {
+  return proxyForUrl(new URL(url), mediaProxySettings(config));
 }
 
 /** Keep deadlines and cancellation active while reading the response body too. */
@@ -29,7 +30,7 @@ async function readResponse(url: string, config: Text2VideoConfig, signal: Abort
       body: body ? JSON.stringify(body) : undefined,
       timeoutMs: config.timeoutMs,
       signal: requestSignal,
-      proxy: proxyFor(url),
+      proxy: proxyFor(url, config),
     });
     const pending = response.buffer();
     const abort = () => response.stream.destroy(new Error("cancelled"));
@@ -62,7 +63,7 @@ async function apiRequest(url: string, config: Text2VideoConfig, signal: AbortSi
   return payload;
 }
 
-function requestBody(options: GenerateVideoOptions): Record<string, unknown> {
+async function requestBody(options: GenerateVideoOptions): Promise<Record<string, unknown>> {
   const { config } = options;
   const model = options.model?.trim() || config.model;
   const resolution = (options.size?.trim() || config.size || "768P").toUpperCase();
@@ -74,21 +75,48 @@ function requestBody(options: GenerateVideoOptions): Record<string, unknown> {
     throw new Error(`MiniMax ${model} duration (--seconds) must be an integer from ${maxVariant ? 5 : 4} to 15`);
   }
   if (!options.prompt.trim()) throw new Error("MiniMax H3 requires a non-empty prompt");
-  const ratio = config.extraBody.ratio ?? "16:9";
-  if (!["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"].includes(String(ratio))) {
-    throw new Error("MiniMax H3 text-to-video ratio must be 21:9, 16:9, 4:3, 1:1, 3:4 or 9:16");
+  const references = [
+    { inputs: options.referenceImages ?? [], kind: "image", limit: 9 },
+    { inputs: options.referenceVideos ?? [], kind: "video", limit: 3 },
+    { inputs: options.referenceAudios ?? [], kind: "audio", limit: 3 },
+  ] as const;
+  const referenceCount = references.reduce((count, reference) => count + reference.inputs.length, 0);
+  const hasFrames = options.firstFrame !== undefined || options.lastFrame !== undefined;
+  if (hasFrames && referenceCount) throw new Error("MiniMax frame inputs cannot be combined with reference inputs");
+  for (const { inputs, kind, limit } of references) {
+    if (inputs.length > limit) throw new Error(`MiniMax allows at most ${limit} reference ${kind} inputs`);
   }
-  return { ...config.extraBody, model, content: [{ type: "text", text: options.prompt }], resolution, duration, ratio };
+  if (referenceCount > 12) throw new Error("MiniMax allows at most 12 reference inputs in total");
+  const content: Record<string, unknown>[] = [{ type: "text", text: options.prompt }];
+  for (const [input, role] of [[options.firstFrame, "first_frame"], [options.lastFrame, "last_frame"]] as const) {
+    if (input !== undefined) {
+      const url = await resolveVideoMedia(input, "image", options.cwd ?? process.cwd(), options.signal);
+      content.push({ type: "image_url", image_url: { url }, role });
+    }
+  }
+  for (const { inputs, kind } of references) {
+    for (const input of inputs) {
+      const url = await resolveVideoMedia(input, kind, options.cwd ?? process.cwd(), options.signal);
+      content.push({ type: `${kind}_url`, [`${kind}_url`]: { url }, role: `reference_${kind}` });
+    }
+  }
+  const ratio = hasFrames ? "adaptive" : options.ratio ?? config.extraBody.ratio ?? (referenceCount ? "adaptive" : "16:9");
+  const allowedRatios = ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", ...(hasFrames || referenceCount ? ["adaptive"] : [])];
+  if (!allowedRatios.includes(String(ratio))) throw new Error(`MiniMax H3 ratio must be ${allowedRatios.join(", ")}`);
+  const body = { ...config.extraBody, model, content, resolution, duration, ratio };
+  if (Buffer.byteLength(JSON.stringify(body)) > 64 * 1024 * 1024) throw new Error("MiniMax request exceeds 64 MB; use public image URLs instead of inline images");
+  return body;
 }
 
 export async function generateWithMiniMax(options: GenerateVideoOptions): Promise<GeneratedVideo[]> {
   const { config } = options;
-  if (!config.apiKey || config.apiKey === "codex") throw new Error("MiniMax requires its own API key: set MINIMAX_API_KEY or text2video apiKey");
-  const body = requestBody(options);
+  if (!config.apiKey || config.apiKey === "codex") throw new Error("MiniMax requires its own API key: set PI_TEXT2VIDEO_API_KEY (or MINIMAX_API_KEY), or apiKey in the text2video config");
+  if (options.signal?.aborted) throw new Error("cancelled");
   const budget = AbortSignal.timeout(config.pollTimeoutMs);
   const signal = options.signal ? AbortSignal.any([options.signal, budget]) : budget;
   let id: string | undefined;
   try {
+    const body = await requestBody({ ...options, signal });
     const submitted = await apiRequest(videosEndpoint(config), config, signal, body);
     id = submitted.task_id;
     if (typeof id !== "string" || !id) throw new Error("MiniMax response has no task_id");

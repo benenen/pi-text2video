@@ -1,7 +1,7 @@
 // OpenAI-compatible video submission, polling, downloads and response parsing.
 import { videoContentEndpoint, videoStatusEndpoint, videosEndpoint, type Text2VideoConfig } from "../../config.ts";
 import { request, type HttpResponse } from "../../http.ts";
-import { proxyForUrl, resolveProxySettings } from "../../proxy-env.ts";
+import { mediaProxySettings, proxyForUrl } from "../../proxy-env.ts";
 import { extFor, videoMimeType } from "../media.ts";
 import type { GeneratedVideo, GenerateVideoOptions } from "../types.ts";
 
@@ -15,8 +15,8 @@ function isHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
 }
 
-function proxyFor(url: string): URL | undefined {
-  return proxyForUrl(new URL(url), resolveProxySettings());
+function proxyFor(url: string, config: Text2VideoConfig): URL | undefined {
+  return proxyForUrl(new URL(url), mediaProxySettings(config));
 }
 
 function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
@@ -64,7 +64,7 @@ async function sendJson(url: string, body: unknown, config: Text2VideoConfig, si
   if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
   let res: HttpResponse;
   try {
-    res = await request(url, { method: "POST", headers, body: JSON.stringify(body), signal, timeoutMs: config.timeoutMs, proxy: proxyFor(url) });
+    res = await request(url, { method: "POST", headers, body: JSON.stringify(body), signal, timeoutMs: config.timeoutMs, proxy: proxyFor(url, config) });
   } catch (err) {
     throw describeFailure(err, config, signal);
   }
@@ -81,7 +81,7 @@ async function sendJson(url: string, body: unknown, config: Text2VideoConfig, si
 async function getJson(url: string, config: Text2VideoConfig, signal: AbortSignal | undefined): Promise<any> {
   let res: HttpResponse;
   try {
-    res = await request(url, { headers: config.headers, signal, timeoutMs: config.timeoutMs, proxy: proxyFor(url) });
+    res = await request(url, { headers: config.headers, signal, timeoutMs: config.timeoutMs, proxy: proxyFor(url, config) });
   } catch (err) {
     throw describeFailure(err, config, signal);
   }
@@ -166,7 +166,7 @@ async function download(url: string, config: Text2VideoConfig, signal: AbortSign
   if (url.startsWith("data:")) return fromBase64(url);
   let res: HttpResponse;
   try {
-    res = await request(url, { signal, timeoutMs: config.timeoutMs, proxy: proxyFor(url) });
+    res = await request(url, { signal, timeoutMs: config.timeoutMs, proxy: proxyFor(url, config) });
   } catch (err) {
     throw describeFailure(err, config, signal);
   }

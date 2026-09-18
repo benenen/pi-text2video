@@ -59,7 +59,9 @@ Runs `codex exec` and collects whatever Codex wrote under `$CODEX_HOME/generated
 
 ### Proxy
 
-Node's `fetch` ignores `HTTPS_PROXY`, and the Codex proxy normally lives in `$CODEX_HOME/.env` where pi never sees it — so this extension reads that file itself and tunnels through the proxy with CONNECT (Basic credentials included). Precedence: explicit config → `$CODEX_HOME/.env` → the process environment, with `NO_PROXY` honoured. It applies to the `openai` provider too.
+Node's `fetch` ignores `HTTPS_PROXY`, and the Codex CLI keeps its proxy in `$CODEX_HOME/.env` where pi never sees it — so the **codex provider** reads that file itself and tunnels through the proxy with CONNECT (Basic credentials included), with `NO_PROXY` honoured.
+
+That file belongs to the Codex CLI, so **nothing else reads it**. The `openai` images provider, the videos API and MiniMax resolve their proxy from their own config (`httpProxy`, `httpsProxy`, `noProxy`, also `PI_TEXT2IMAGE_*_PROXY` / `PI_TEXT2VIDEO_*_PROXY`) and then the process environment; with neither set they go direct, which is what a domestic endpoint like `metaso.cn` needs. `/image config` and `/video config` print the proxy actually in effect.
 
 ## Configuration
 
@@ -86,7 +88,7 @@ Images read `~/.pi/agent/text2image.json` (user) and `./.pi/text2image.json` (pr
 | `codexClientId` *(codex/api)* | `PI_TEXT2IMAGE_CODEX_CLIENT_ID` | `CODEX_APP_SERVER_LOGIN_CLIENT_ID`, else the `aud` of the stored `id_token`, else the upstream constant | OAuth client used for token refresh |
 | `codexCommand` *(codex/cli)* | `PI_TEXT2IMAGE_CODEX_COMMAND` | `codex` | the Codex CLI to run |
 | `codexModel` *(codex/cli)* | `PI_TEXT2IMAGE_CODEX_MODEL` | Codex default | agent model for the turn, not the image model |
-| `httpProxy`, `httpsProxy`, `noProxy` | — | from `$CODEX_HOME/.env`, then the environment | see Proxy above |
+| `httpProxy`, `httpsProxy`, `noProxy` | `PI_TEXT2IMAGE_HTTP_PROXY`, `…_HTTPS_PROXY`, `…_NO_PROXY` | none (direct) | proxy for the images API only; `$CODEX_HOME/.env` is not consulted |
 
 `baseUrl` and `apiKey` fall back to `OPENAI_BASE_URL` / `OPENAI_API_KEY` when unset.
 
@@ -163,6 +165,7 @@ Video reads its own config files — `~/.pi/agent/text2video.json` (user) and `.
 | `responseFormat` | `PI_TEXT2VIDEO_RESPONSE_FORMAT` | not sent | rarely needed |
 | `headers` | `PI_TEXT2VIDEO_HEADERS` (JSON) | `{}` | extra request headers |
 | `extraBody` | `PI_TEXT2VIDEO_EXTRA_BODY` (JSON) | `{}` | merged into the submit body, for `aspect_ratio` and friends |
+| `httpProxy`, `httpsProxy`, `noProxy` | `PI_TEXT2VIDEO_HTTP_PROXY`, `…_HTTPS_PROXY`, `…_NO_PROXY` | none (direct) | proxy for the videos API only; `$CODEX_HOME/.env` is not consulted |
 | `useCodexAuth` | `PI_TEXT2VIDEO_USE_CODEX_AUTH` | `true` | borrow a codex API key when none is configured |
 
 ```jsonc
@@ -201,7 +204,72 @@ Supply the key through `MINIMAX_API_KEY`, `PI_TEXT2VIDEO_API_KEY`, or the video 
 
 H3 uses named resolution tiers (`768P` or `2K`), not pixel dimensions; `seconds` must be an integer from 4 to 15. `MiniMax-H3-Max` accepts `480P` or `768P` and 5–15 seconds. A fresh MiniMax config defaults to `768P`, 6 seconds and `16:9`. Set `extraBody.ratio` to `21:9`, `16:9`, `4:3`, `1:1`, `3:4` or `9:16`. Empty size/seconds fall back to the MiniMax defaults because the API requires these fields. `responseFormat` and `useCodexAuth` apply only to OpenAI.
 
-The provider translates the prompt to `content: [{ "type": "text", "text": "..." }]`, posts to `/v2/video_generation`, then queries `/v2/query/video_generation/{task_id}` until completion. It downloads `task.content.url` without forwarding API credentials to the CDN. Both requests and response bodies honor timeouts and cancellation. This integration covers text-to-video; multimodal references are not exposed by the tool.
+The provider translates the prompt to `content: [{ "type": "text", "text": "..." }]`, posts to `/v2/video_generation`, then queries `/v2/query/video_generation/{task_id}` until completion. It downloads `task.content.url` without forwarding API credentials to the CDN. Both requests and response bodies honor timeouts and cancellation. The tool supports text-to-video and first/last-frame image-to-video and multimodal reference-to-video.
+
+#### Image-to-video and native audio
+
+With `provider: "minimax"`, pass `firstFrame` and/or `lastFrame` to `generate_video`. Each accepts a local image path (relative to the current project, absolute, or `~/...`), a public HTTP(S) URL, or a Base64 image Data URL. Local images are encoded and uploaded to MiniMax with the request. Supported formats are JPEG, PNG, WebP, HEIC and HEIF; inline/local images are limited to 30 MB each and the whole request to 64 MB. Use public URLs for large inputs. MiniMax validates image dimensions and aspect ratios.
+
+```text
+/video Waves wash over the beach, with surf sounds and soft piano --first-frame "assets/beach photo.png" --seconds 8 --size 2K
+/video The camera glides toward the lighthouse, with wind and gull calls --first-frame https://example.com/start.jpg --last-frame https://example.com/end.jpg
+/video A flower gradually opens --last-frame assets/open-flower.png
+```
+
+Equivalent tool arguments:
+
+```json
+{
+  "prompt": "The person smiles and says Hello, with quiet birdsong in the background",
+  "firstFrame": "assets/portrait.png",
+  "seconds": "8",
+  "size": "768P"
+}
+```
+
+A single image can specify the first or last frame; two specify both. Frame-based generation always sends `ratio: "adaptive"` because the output follows the input image, overriding the text-to-video ratio setting. An unsupported provider rejects frame inputs before submitting a task.
+
+**Audio:** [MiniMax's official H3 model description](https://github.com/MiniMax-AI/MiniMax-H3#system-overview) specifies native video with 32 kHz stereo audio, including the first/last-frame workflow. Describe desired dialogue, ambience, sound effects or music in the prompt. The documented V2 request has no separate audio on/off parameter, so this integration does not invent one. The returned video is saved byte-for-byte, preserving any audio tracks supplied by the service. Local tests verify request construction and file preservation; they do not verify live model audio quality.
+
+#### Multimodal reference-to-video (including Metaso)
+
+`generate_video` accepts ordered `referenceImages`, `referenceVideos` and `referenceAudios` arrays. These become `reference_image`, `reference_video` and `reference_audio` content items. The prompt is always the first text item; ordering within each media type is preserved for instructions such as "video 1" and "audio 1". Reference inputs cannot be mixed with `firstFrame` or `lastFrame`.
+
+```json
+{
+  "prompt": "The character says: Follow the wind, live free. Use the timbre of audio 1 and the appearance of video 1.",
+  "referenceVideos": ["https://example.com/character.mp4"],
+  "referenceAudios": ["https://example.com/voice.mp3"],
+  "size": "2K",
+  "seconds": "5",
+  "ratio": "adaptive"
+}
+```
+
+Equivalent manual invocation (each reference flag can be repeated):
+
+```text
+/video The character says Hello, with the timbre of audio 1 --reference-video "assets/character.mp4" --reference-audio "assets/voice.mp3" --seconds 5 --size 2K --ratio adaptive
+/video A cinematic scene matching image 1 and image 2 --reference-image assets/style.png --reference-image https://example.com/subject.jpg
+```
+
+References accept local paths, public HTTP(S) URLs or Base64 Data URLs. Limits: up to 9 images (30 MB each), 3 MP4/MOV videos (50 MB each), 3 MP3/WAV audio clips (15 MB each), and 12 references total. The serialized request is limited to 64 MB, including Base64 expansion; public URLs are preferable for larger files. The service validates durations (2–15 seconds per reference video/audio and at most 15 seconds total per type), codecs, dimensions and aspect ratios. This client validates input counts, local/inline sizes, media types and mode combinations before submission.
+
+Reference mode defaults to `adaptive` unless `extraBody.ratio` is configured; an explicit tool `ratio` or command `--ratio` overrides that setting. Text-only mode requires a concrete ratio, and frame mode always follows the image.
+
+For a MiniMax-compatible gateway such as the supplied Metaso endpoint, set `.pi/text2video.json` to:
+
+```json
+{
+  "provider": "minimax",
+  "baseUrl": "https://metaso.cn/api/minimax",
+  "model": "MiniMax-H3",
+  "size": "2K",
+  "seconds": "5"
+}
+```
+
+Supply the gateway credential through `PI_TEXT2VIDEO_API_KEY`. The URL prefix is preserved: generation uses `/api/minimax/v2/video_generation`, polling uses `/api/minimax/v2/query/video_generation/{task_id}`. A full generation URL is also accepted as `baseUrl`. These routes are covered by a local gateway simulation; no live Metaso generation is performed by the tests.
 
 API references: [create task](https://platform.minimax.io/docs/api-reference/video-generation-v2-create), [query task](https://platform.minimax.cn/docs/api-reference/video-generation-v2-query). The [model details endpoint](https://platform.minimax.cn/docs/api-reference/models/openai/retrieve-model) describes a model; it does not generate video.
 
@@ -209,7 +277,7 @@ Available npm libraries include the official [`mmx-cli` SDK](https://github.com/
 
 ## Usage
 
-**From the model**: just ask for a picture and it calls `generate_image`. Parameters: `prompt`, `n` (1-4), `size`, `model`, `filename`. Ask for a clip and it calls `generate_video`; parameters: `prompt`, `seconds`, `size`, `model`, `filename`.
+**From the model**: just ask for a picture and it calls `generate_image`. Parameters: `prompt`, `n` (1-4), `size`, `model`, `filename`. Ask for a clip and it calls `generate_video`; parameters: `prompt`, `seconds`, `size`, `model`, `filename`, plus MiniMax `firstFrame`, `lastFrame`, `referenceImages`, `referenceVideos`, `referenceAudios` and `ratio`.
 
 **By hand**:
 
@@ -283,12 +351,13 @@ src/image/types.ts               shared image provider input and output types
 src/videos.ts                    video generation entry point and saving to disk
 src/video/provider/openai.ts     OpenAI-compatible videos API: submit, poll, download
 src/video/provider/minimax.ts    MiniMax H3 V2: text content, task polling, signed download
+src/video/media-input.ts         local/URL/data URL image, video and audio inputs
 src/video/media.ts               video MIME and extension detection
 src/video/types.ts               video provider input and output types
 src/files.ts                     shared output naming and byte formatting
 src/codex-import.ts              /image config import codex: detect, probe, write config
 src/http.ts                      dependency-free HTTP with CONNECT proxy tunnelling
-src/proxy-env.ts                 proxy resolution ($CODEX_HOME/.env → environment)
+src/proxy-env.ts                 proxy resolution (codex .env for the codex provider; media APIs resolve their own)
 ```
 
 ## Roadmap

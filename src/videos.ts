@@ -6,6 +6,9 @@ import { generateWithOpenAI } from "./video/provider/openai.ts";
 import type { GeneratedVideo, SavedVideo, GenerateVideoOptions } from "./video/types.ts";
 
 export async function generateVideos(options: GenerateVideoOptions): Promise<GeneratedVideo[]> {
+  if (options.config.provider !== "minimax" && (options.firstFrame !== undefined || options.lastFrame !== undefined || options.referenceImages?.length || options.referenceVideos?.length || options.referenceAudios?.length || options.ratio !== undefined)) {
+    throw new Error("image/reference inputs and ratio currently require the MiniMax provider");
+  }
   return options.config.provider === "minimax" ? generateWithMiniMax(options) : generateWithOpenAI(options);
 }
 export { videoMimeType } from "./video/media.ts";

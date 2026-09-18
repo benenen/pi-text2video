@@ -42,6 +42,7 @@ assert.equal(config.size, "1280x720");
 assert.equal(config.seconds, "4");
 assert.equal(config.extraBody.aspect_ratio, "16:9");
 assert.equal(config.pollIntervalMs, 5);
+assert.equal(config.apiKeySource, "text2video-env", "an env key must be reported as coming from the environment, not from a config file");
 console.log("✓ video config resolution and endpoints");
 
 // The async path: submit, poll twice, fetch the bytes from /content
@@ -127,6 +128,7 @@ console.log("✓ video config file is written and read back independently");
 const described = describeVideoConfig(config, cwd).join("\n");
 assert.ok(described.includes("vide…5678") && !described.includes("video-key-5678"), "the video key must be redacted");
 assert.ok(described.includes("text2video.json"));
+assert.ok(described.includes("(from PI_TEXT2VIDEO_API_KEY)"), "the config card names the env var the key came from");
 console.log("✓ video config output is redacted");
 
 api.close();

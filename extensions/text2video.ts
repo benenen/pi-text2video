@@ -10,7 +10,8 @@ import {
   projectVideoConfigPath, resolveOutputDir, userVideoConfigPath, VIDEO_CONFIG_FIELDS, writeConfigPatch,
 } from "../src/config.ts";
 import { formatBytes } from "../src/files.ts";
-import { generateVideos, saveVideos, type SavedVideo } from "../src/videos.ts";
+import { describeVideoProxy } from "../src/proxy-env.ts";
+import { generateVideos, saveVideos, type SavedVideo, type GenerateVideoOptions } from "../src/videos.ts";
 import { errorMessage, registerInfoRenderer, type InfoEntryData } from "./lib/ui.ts";
 
 interface VideoFile {
@@ -60,30 +61,50 @@ function videoLines(details: { provider: string; model: string; endpoint: string
   ];
 }
 
-function parseVideoArgs(input: string): { prompt: string; seconds?: string; size?: string; model?: string } {
-  const tokens = input.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+type VideoCommandArgs = Pick<GenerateVideoOptions, "prompt" | "seconds" | "size" | "model" | "firstFrame" | "lastFrame" | "referenceImages" | "referenceVideos" | "referenceAudios" | "ratio">;
+
+/** The config card plus the one thing describeVideoConfig cannot infer: the proxy in effect. */
+function videoConfigLines(config: ReturnType<typeof loadVideoConfig>, cwd: string): string[] {
+  return [...describeVideoConfig(config, cwd), "", `proxy      ${describeVideoProxy(config)}`];
+}
+
+function parseVideoArgs(input: string): VideoCommandArgs {
+  const tokens = input.match(/--[\w-]+=(?:"[^"]*"|'[^']*'|\S+)|"[^"]*"|'[^']*'|\S+/g) ?? [];
   const unquote = (value: string | undefined) => value?.replace(/^["']|["']$/g, "");
   const words: string[] = [];
   let seconds: string | undefined;
   let size: string | undefined;
   let model: string | undefined;
+  let firstFrame: string | undefined;
+  let lastFrame: string | undefined;
+  let ratio: string | undefined;
+  const referenceImages: string[] = [];
+  const referenceVideos: string[] = [];
+  const referenceAudios: string[] = [];
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
-    const inline = token.match(/^--(seconds|duration|size|model)=(.*)$/);
-    const isFlag = inline !== null || /^--?(seconds|duration|d|size|model|m)$/.test(token);
+    const inline = token.match(/^--(seconds|duration|size|model|first-frame|last-frame|reference-image|reference-video|reference-audio|ratio)=(.*)$/);
+    const isFlag = inline !== null || /^--?(seconds|duration|d|size|model|m|first-frame|last-frame|reference-image|reference-video|reference-audio|ratio)$/.test(token);
     if (isFlag) {
       const name = inline ? inline[1] : token.replace(/^--?/, "");
       const value = inline ? unquote(inline[2]) : unquote(tokens[++i]);
+      if (!value || value.startsWith("--")) throw new Error(`--${name} requires a value`);
       if (name === "seconds" || name === "duration" || name === "d") seconds = value;
       else if (name === "size") size = value;
       else if (name === "model" || name === "m") model = value;
+      else if (name === "first-frame") firstFrame = value;
+      else if (name === "last-frame") lastFrame = value;
+      else if (name === "reference-image") referenceImages.push(value);
+      else if (name === "reference-video") referenceVideos.push(value);
+      else if (name === "reference-audio") referenceAudios.push(value);
+      else if (name === "ratio") ratio = value;
       continue;
     }
     words.push(unquote(token) ?? token);
   }
 
-  return { prompt: words.join(" ").trim(), seconds, size, model };
+  return { prompt: words.join(" ").trim(), seconds, size, model, firstFrame, lastFrame, referenceImages, referenceVideos, referenceAudios, ratio };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -92,14 +113,16 @@ export default function (pi: ExtensionAPI) {
     name: "generate_video",
     label: "Generate Video",
     description:
-      "Generate a short video clip from a text prompt through the configured video provider, " +
+      "Generate a short video clip from a text prompt and optional MiniMax H3 frame or reference media through the configured video provider, " +
       "save it to disk and return its absolute path. This is an asynchronous job: it runs for minutes and " +
       "costs money per clip, so call it once with a well-written prompt rather than iterating blindly.",
-    promptSnippet: "Generate a short video clip from a text prompt and save it to disk",
+    promptSnippet: "Generate video from text or MiniMax H3 frame images and save it to disk",
     promptGuidelines: [
       "Use generate_video when the user asks for a video, an animation or a moving shot to be created.",
       "Do not use generate_video for still images (use generate_image) or for motion that is really code — write CSS, SVG or a script for those.",
       "generate_video takes minutes and bills per clip: write one detailed prompt — subject, camera movement, lighting, style — instead of generating variants.",
+      "For MiniMax H3 image-to-video, pass firstFrame and/or lastFrame as local image paths, public URLs or image data URLs. Describe motion and desired dialogue, ambience or music in the prompt; H3 supports native audio without an audio flag.",
+      "For MiniMax H3 reference generation, use referenceImages/referenceVideos/referenceAudios arrays. Preserve input order for references such as video 1 or audio 1. Reference mode cannot be combined with firstFrame or lastFrame. Set ratio to adaptive to follow the references.",
       "After generate_video returns, tell the user where the file landed; the path in the result is absolute.",
     ],
     parameters: Type.Object({
@@ -107,6 +130,12 @@ export default function (pi: ExtensionAPI) {
         description:
           "What to film, in English unless the user asked otherwise. Describe subject, action, camera movement, lighting and style — video models follow detailed prompts much better than short ones.",
       }),
+      firstFrame: Type.Optional(Type.String({ description: "MiniMax H3 starting image: local path (relative to cwd), public HTTP(S) URL or base64 image data URL." })),
+      lastFrame: Type.Optional(Type.String({ description: "MiniMax H3 ending image: local path, public HTTP(S) URL or base64 image data URL. Can be used alone or with firstFrame." })),
+      referenceImages: Type.Optional(Type.Array(Type.String(), { maxItems: 9, description: "MiniMax reference images, ordered for image 1, image 2, etc. Local paths, public URLs or image data URLs. Cannot be combined with firstFrame/lastFrame." })),
+      referenceVideos: Type.Optional(Type.Array(Type.String(), { maxItems: 3, description: "MiniMax reference videos in order. Local MP4/MOV paths, public URLs or video data URLs." })),
+      referenceAudios: Type.Optional(Type.Array(Type.String(), { maxItems: 3, description: "MiniMax reference audio in order, e.g. audio 1 for voice/timbre. Local MP3/WAV paths, public URLs or audio data URLs." })),
+      ratio: Type.Optional(Type.String({ description: "MiniMax aspect ratio: 21:9, 16:9, 4:3, 1:1, 3:4, 9:16; reference mode also accepts adaptive. Frame mode always follows the image." })),
       seconds: Type.Optional(Type.String({ description: 'Clip length in seconds, e.g. "4" or "8". Defaults to the configured seconds.' })),
       size: Type.Optional(Type.String({ description: "Video size, OpenAI: 1280x720 or 720x1280; MiniMax H3: 768P or 2K. Defaults to the configured size." })),
       model: Type.Optional(Type.String({ description: "Override the configured video model. Only set this when the user named a model." })),
@@ -125,6 +154,13 @@ export default function (pi: ExtensionAPI) {
       const videos = await generateVideos({
         config,
         prompt: params.prompt,
+        firstFrame: params.firstFrame,
+        lastFrame: params.lastFrame,
+        referenceImages: params.referenceImages,
+        referenceVideos: params.referenceVideos,
+        referenceAudios: params.referenceAudios,
+        ratio: params.ratio,
+        cwd: ctx.cwd,
         size,
         seconds,
         model: params.model,
@@ -153,7 +189,7 @@ export default function (pi: ExtensionAPI) {
     renderCall(args, theme) {
       let text = theme.fg("toolTitle", theme.bold("generate_video "));
       text += theme.fg("muted", `"${(args.prompt ?? "").slice(0, 80)}"`);
-      const extras = [args.model, args.size, args.seconds ? `${args.seconds}s` : undefined].filter(Boolean);
+      const extras = [args.model, args.size, args.seconds ? `${args.seconds}s` : undefined, args.firstFrame ? "first frame" : undefined, args.lastFrame ? "last frame" : undefined, args.referenceImages?.length ? `${args.referenceImages.length} ref image(s)` : undefined, args.referenceVideos?.length ? `${args.referenceVideos.length} ref video(s)` : undefined, args.referenceAudios?.length ? `${args.referenceAudios.length} ref audio(s)` : undefined, args.ratio].filter(Boolean);
       if (extras.length > 0) text += theme.fg("dim", ` ${extras.join(" ")}`);
       return new Text(text, 0, 0);
     },
@@ -183,11 +219,17 @@ export default function (pi: ExtensionAPI) {
   // ---- text-to-video: /video ----
   pi.registerCommand("video", {
     description:
-      "Text-to-video: /video <prompt> [--seconds 4] [--size 1280x720] [--model xxx]; /video config shows the video config, /video config set <key> <value> [--project] changes it",
+      "Text-to-video: /video <prompt> [--first-frame path-or-url] [--last-frame path-or-url] [--reference-image path-or-url] [--reference-video path-or-url] [--reference-audio path-or-url] [--ratio adaptive] [--seconds 4] [--size 1280x720] [--model xxx]; /video config shows the video config, /video config set <key> <value> [--project] changes it",
     getArgumentCompletions: (prefix) => {
       const items = [
         { value: "config", label: "config — show the resolved video configuration" },
         { value: "config set ", label: "config set <key> <value> [--project] — write a setting" },
+        { value: "--first-frame ", label: "--first-frame <path-or-url> — MiniMax H3 starting image" },
+        { value: "--last-frame ", label: "--last-frame <path-or-url> — MiniMax H3 ending image" },
+        { value: "--reference-image ", label: "--reference-image <path-or-url> — repeat for multiple images" },
+        { value: "--reference-video ", label: "--reference-video <path-or-url> — repeat for multiple videos" },
+        { value: "--reference-audio ", label: "--reference-audio <path-or-url> — repeat for multiple audio clips" },
+        { value: "--ratio ", label: "--ratio <16:9|adaptive|...> — MiniMax aspect ratio" },
         { value: "--seconds ", label: "--seconds <n>" },
         { value: "--size ", label: "--size <width>x<height>" },
         { value: "--model ", label: "--model <model>" },
@@ -198,7 +240,7 @@ export default function (pi: ExtensionAPI) {
       const raw = args.trim();
 
       if (raw === "config" || raw === "--config") {
-        pi.appendEntry<InfoEntryData>("text2video-info", { title: "🎬 text2video config", lines: describeVideoConfig(loadVideoConfig(ctx.cwd), ctx.cwd) });
+        pi.appendEntry<InfoEntryData>("text2video-info", { title: "🎬 text2video config", lines: videoConfigLines(loadVideoConfig(ctx.cwd), ctx.cwd) });
         return;
       }
 
@@ -229,7 +271,7 @@ export default function (pi: ExtensionAPI) {
           const changes = describeChanges(applied.before, applied.after);
           pi.appendEntry<InfoEntryData>("text2video-info", {
             title: "🎬 text2video config changed",
-            lines: [`wrote ${applied.path}`, ...(changes.length > 0 ? changes.map((change) => `  ${change}`) : ["  (no change)"]), "", ...describeVideoConfig(loadVideoConfig(ctx.cwd), ctx.cwd)],
+            lines: [`wrote ${applied.path}`, ...(changes.length > 0 ? changes.map((change) => `  ${change}`) : ["  (no change)"]), "", ...videoConfigLines(loadVideoConfig(ctx.cwd), ctx.cwd)],
           });
         } catch (err) {
           ctx.ui.notify(`Cannot change the video config: ${errorMessage(err)}`, "error");
@@ -237,11 +279,17 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const parsed = parseVideoArgs(raw);
+      let parsed: ReturnType<typeof parseVideoArgs>;
+      try {
+        parsed = parseVideoArgs(raw);
+      } catch (err) {
+        ctx.ui.notify(`Invalid video arguments: ${errorMessage(err)}`, "error");
+        return;
+      }
       let prompt = parsed.prompt;
       if (!prompt) {
         if (!ctx.hasUI) {
-          ctx.ui.notify("Usage: /video <prompt> [--seconds 4] [--size 1280x720] [--model xxx]", "warning");
+          ctx.ui.notify("Usage: /video <prompt> [--first-frame path-or-url] [--last-frame path-or-url] [--reference-image path-or-url] [--reference-video path-or-url] [--reference-audio path-or-url] [--ratio adaptive] [--seconds 4] [--size 1280x720] [--model xxx]", "warning");
           return;
         }
         prompt = (await ctx.ui.input("Video prompt", "a paper boat drifting down a rain-soaked street, cinematic"))?.trim() ?? "";
@@ -258,6 +306,13 @@ export default function (pi: ExtensionAPI) {
         const videos = await generateVideos({
           config,
           prompt,
+          firstFrame: parsed.firstFrame,
+          lastFrame: parsed.lastFrame,
+          referenceImages: parsed.referenceImages,
+          referenceVideos: parsed.referenceVideos,
+          referenceAudios: parsed.referenceAudios,
+          ratio: parsed.ratio,
+          cwd: ctx.cwd,
           size,
           seconds,
           model: parsed.model,

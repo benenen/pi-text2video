@@ -17,7 +17,7 @@ process.env.CODEX_HOME = codexHome;
 for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"]) delete process.env[key];
 
 const loader = await createLoader();
-const { parseDotenv, resolveProxySettings, proxyForUrl, bypassesProxy, describeProxy, codexEnvPath } = await loader.import("src/proxy-env.ts");
+const { parseDotenv, resolveProxySettings, mediaProxySettings, proxyForUrl, bypassesProxy, describeProxy, codexEnvPath } = await loader.import("src/proxy-env.ts");
 const { request } = await loader.import("src/http.ts");
 
 // --- resolution ---------------------------------------------------------
@@ -37,8 +37,17 @@ assert.ok(bypassesProxy("app.internal", ".internal") && !bypassesProxy("internal
 assert.equal(describeProxy(proxyForUrl(new URL("https://chatgpt.com"), settings)), "http://***@10.0.0.1:3128");
 assert.ok(!describeProxy(proxyForUrl(new URL("https://chatgpt.com"), settings)).includes("secret"), "credentials must never be printed");
 
+// The media APIs (images, videos, MiniMax) must not inherit the Codex CLI proxy
+assert.equal(mediaProxySettings({}).source, "none", "without its own setting a media request goes direct");
+assert.equal(proxyForUrl(new URL("https://metaso.cn/api/minimax/v1/models"), mediaProxySettings({})), undefined);
+assert.equal(mediaProxySettings({ noProxy: "*" }).source, "config");
+assert.equal(mediaProxySettings({ httpProxy: "http://media-proxy:1" }).source, "config");
+assert.equal(proxyForUrl(new URL("https://metaso.cn/x"), mediaProxySettings({ httpsProxy: "http://media-proxy:1" })).host, "media-proxy:1");
+console.log("✓ the Codex proxy stays with the codex provider");
+
 process.env.HTTP_PROXY = "http://env-proxy:9";
 assert.equal(resolveProxySettings().source, "codex-env", "codex .env outranks the process environment");
+assert.equal(mediaProxySettings({}).source, "environment", "a media request may still use the process environment");
 fs.rmSync(codexEnvPath());
 assert.equal(resolveProxySettings().source, "environment");
 assert.equal(resolveProxySettings({ httpsProxy: "http://explicit:1" }).source, "config");

@@ -1,7 +1,7 @@
 // OpenAI-compatible image requests, downloads and vendor response parsing.
 import { imagesEndpoint, type Text2ImageConfig } from "../../config.ts";
 import { request, type HttpResponse } from "../../http.ts";
-import { proxyForUrl, resolveProxySettings } from "../../proxy-env.ts";
+import { mediaProxySettings, proxyForUrl } from "../../proxy-env.ts";
 import { extFor, sniffMime, fromBase64, imageDimensions } from "../media.ts";
 import type { GeneratedImage, GenerateOptions } from "../types.ts";
 
@@ -15,8 +15,8 @@ function isHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
 }
 
-function proxyFor(url: string): URL | undefined {
-  return proxyForUrl(new URL(url), resolveProxySettings());
+function proxyFor(url: string, config: Text2ImageConfig): URL | undefined {
+  return proxyForUrl(new URL(url), mediaProxySettings(config));
 }
 
 /** Turn a transport failure into one sentence the caller can act on. */
@@ -70,9 +70,9 @@ function pickUrl(item: any): string | undefined {
   return undefined;
 }
 
-async function download(url: string, timeoutMs: number, signal: AbortSignal | undefined, revisedPrompt?: string): Promise<GeneratedImage> {
+async function download(url: string, config: Text2ImageConfig, signal: AbortSignal | undefined, revisedPrompt?: string): Promise<GeneratedImage> {
   if (url.startsWith("data:")) return fromBase64(url, revisedPrompt);
-  const res = await request(url, { signal, timeoutMs, proxy: proxyFor(url) });
+  const res = await request(url, { signal, timeoutMs: config.timeoutMs, proxy: proxyFor(url, config) });
   if (res.status < 200 || res.status >= 300) throw new Error(`image download failed ${res.status} ${res.statusText}: ${url}`);
   const data = await res.buffer();
   const contentType = res.headers["content-type"];
@@ -102,7 +102,7 @@ export async function generateWithOpenAI(options: GenerateOptions): Promise<Gene
       body: JSON.stringify(body),
       signal: options.signal,
       timeoutMs: config.timeoutMs,
-      proxy: proxyFor(endpoint),
+      proxy: proxyFor(endpoint, config),
     });
   } catch (err) {
     throw describeFailure(err, config, options.signal);
@@ -120,7 +120,7 @@ export async function generateWithOpenAI(options: GenerateOptions): Promise<Gene
     const url = typeof item === "string" ? (isHttpUrl(item) || item.startsWith("data:") ? item : undefined) : pickUrl(item);
     try {
       if (base64) images.push(fromBase64(base64, revisedPrompt));
-      else if (url) images.push(await download(url, config.timeoutMs, options.signal, revisedPrompt));
+      else if (url) images.push(await download(url, config, options.signal, revisedPrompt));
       else throw new Error(`unrecognised response item: ${preview(item, 200)}`);
     } catch (err) {
       if (err instanceof Error && /cancelled|timed out/.test(err.message)) throw describeFailure(err, config, options.signal);
